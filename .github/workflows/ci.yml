@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build
+        run: make all GOARCH=amd64
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test ./...
+
+  helm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - name: Lint chart
+        run: helm lint chart/ --set buildctlDaemon.auth.token=ci-lint-placeholder
+      - name: Render chart
+        run: helm template chart/ --set buildctlDaemon.auth.token=ci-lint-placeholder > /dev/null
+      - name: Lint quickstart profile
+        run: helm lint chart/ --values chart/values-quickstart.yaml --set buildctlDaemon.auth.token=ci-lint-placeholder
+      - name: Render quickstart profile
+        run: helm template chart/ --values chart/values-quickstart.yaml --set buildctlDaemon.auth.token=ci-lint-placeholder > /dev/null
+
+  scripts-and-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - name: Check shell and Python syntax
+        run: |
+          bash -n scripts/buildctl-batch.sh scripts/preheat.sh cmd/buildctl-daemon/test/integration.sh chart/images/apt-cacher-ng/entrypoint.sh
+          python3 -m py_compile chart/images/git-cache/git-cache-server.py
+      - name: Parse generated and embedded YAML
+        run: |
+          python3 -m pip install --disable-pip-version-check pyyaml
+          tmp=$(mktemp -d)
+          trap 'rm -rf "$tmp"' EXIT
+          cat > "$tmp/kubectl" <<'EOF'
+          #!/bin/sh
+          case "$*" in
+            *"get pod"*) exit 1 ;;
+            *"create -f -"*) cat > "$CAPTURE" ;;
+            *"wait"*|*"exec"*) exit 0 ;;
+          esac
+          EOF
+          chmod +x "$tmp/kubectl"
+          CAPTURE="$tmp/runner.yaml" PATH="$tmp:$PATH" scripts/buildctl-batch.sh --kubeconfig "$tmp/kubeconfig" --name ci-runner prepare >/dev/null
+          helm template buildkit-service chart/ --set buildctlDaemon.auth.token=ci-lint-placeholder > "$tmp/chart.yaml"
+          python3 - "$tmp/runner.yaml" "$tmp/chart.yaml" <<'PY'
+          import sys, yaml
+          runner = yaml.safe_load(open(sys.argv[1]))
+          assert runner['kind'] == 'Pod'
+          docs = [doc for doc in yaml.safe_load_all(open(sys.argv[2])) if doc]
+          secrets = [doc for doc in docs if doc.get('kind') == 'Secret']
+          assert len(secrets) >= 3
+          registry = next(doc for doc in secrets if doc['metadata']['name'].endswith('-registry-dockerhub-config'))
+          yaml.safe_load(registry['stringData']['config.yml'])
+          PY
+      - name: Check local Markdown links
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          root = Path('.')
+          files = [root / 'README.md', *sorted((root / 'docs').glob('*.md')), root / 'cmd/buildctl-daemon/test/README.md']
+          for source in files:
+              for target in re.findall(r'\[[^]]+\]\((?!https?://|mailto:)([^) ]+)\)', source.read_text()):
+                  relative = target.split('#', 1)[0]
+                  destination = source if not relative else source.parent / relative
+                  assert destination.exists(), f'{source} -> {target}'
+          PY

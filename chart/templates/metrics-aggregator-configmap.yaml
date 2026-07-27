@@ -1,0 +1,62 @@
+{{- if and .Values.buildkit.enabled .Values.metricsAggregator.enabled }}
+{{- $ns := include "buildkit-service.namespace" . }}
+{{- $pmns := include "buildkit-service.packageMirror.namespace" . }}
+{{- $domain := .Values.metricsAggregator.clusterDomain }}
+{{- $jobs := list }}
+{{- if .Values.buildkitdCacheMetrics.enabled }}
+{{- $jobs = append $jobs (dict
+    "kind" "dirsize_sum"
+    "name" "buildkit_service"
+    "prefix" "buildkit_service"
+    "dns" (printf "%s-cache-metrics.%s.svc.%s" (include "buildkit-service.fullname" .) $ns $domain)
+    "port" (int .Values.buildkitdCacheMetrics.port)
+    "path" "/metrics") }}
+{{- end }}
+{{- if .Values.buildctlDaemon.enabled }}
+{{- $jobs = append $jobs (dict
+    "kind" "passthrough"
+    "name" "buildctl_daemon"
+    "match_prefix" "buildctl_daemon_"
+    "url" (printf "http://%s.%s.svc.%s:%d/metrics" (include "buildkit-service.buildctlDaemonName" .) $ns $domain (int .Values.buildctlDaemon.service.port))) }}
+{{- end }}
+{{- if and .Values.packageMirror.enabled .Values.packageMirror.metrics.enabled }}
+{{- $jobs = append $jobs (dict
+    "kind" "passthrough"
+    "name" "package_mirror"
+    "match_prefix" "package_mirror_"
+    "url" (printf "http://%s.%s.svc.%s:%d/metrics" .Values.packageMirror.metrics.serviceName $pmns $domain (int .Values.packageMirror.service.port))) }}
+{{- end }}
+{{- if .Values.packageMirror.enabled }}
+{{- $selectedMirrors := include "buildkit-service.packageMirror.selectedRegistryMirrors" . | fromYamlArray }}
+{{- $cacheAgg := "sum" }}
+{{- if or .Values.packageMirror.registry.persistence.enabled .Values.packageMirror.persistence.enabled }}
+{{- $cacheAgg = "first" }}
+{{- end }}
+{{- range $selectedMirrors }}
+{{- if .enabled }}
+{{- $metricsSvc := printf "%s-metrics.%s.svc.%s" .serviceName $pmns $domain }}
+{{- $jobs = append $jobs (dict
+    "kind" "registry"
+    "name" .name
+    "cache_dns" $metricsSvc
+    "cache_port" (int $.Values.packageMirror.registry.cacheMetrics.port)
+    "cache_agg" $cacheAgg
+    "debug_dns" $metricsSvc
+    "debug_port" (int .debugPort)) }}
+{{- end }}
+{{- end }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "buildkit-service.fullname" . }}-metrics-aggregator
+  namespace: {{ $ns }}
+  labels:
+    {{- include "buildkit-service.labels" . | nindent 4 }}
+    app.kubernetes.io/component: metrics-aggregator
+data:
+  targets.json: |
+    {{- dict "jobs" $jobs | toPrettyJson | nindent 4 }}
+  aggregator.py: |
+{{ include "buildkit-service.metricsAggregatorScript" . | indent 4 }}
+{{- end }}

@@ -1,0 +1,20 @@
+{{- if and .Values.buildkit.enabled .Values.metricsAggregator.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "buildkit-service.fullname" . }}-metrics-aggregator
+  namespace: {{ include "buildkit-service.namespace" . }}
+  labels:
+    {{- include "buildkit-service.labels" . | nindent 4 }}
+    app.kubernetes.io/component: metrics-aggregator
+spec:
+  type: {{ .Values.metricsAggregator.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.metricsAggregator.service.port }}
+      targetPort: {{ .Values.metricsAggregator.portName }}
+      protocol: TCP
+  selector:
+    {{- include "buildkit-service.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: metrics-aggregator
+{{- end }}

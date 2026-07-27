@@ -1,0 +1,132 @@
+{{- if .Values.packageMirror.enabled }}
+{{- $apk := dict "serviceName" .Values.packageMirror.apk.serviceName "portName" .Values.packageMirror.aptYum.portName "protocol" .Values.packageMirror.aptYum.protocol -}}
+{{- $backends := list .Values.packageMirror.pip .Values.packageMirror.npm .Values.packageMirror.aptYum $apk -}}
+{{- range $backends }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .serviceName }}
+  namespace: {{ include "buildkit-service.packageMirror.namespace" $ }}
+  labels:
+    {{- include "buildkit-service.packageMirror.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ .serviceName }}
+spec:
+  type: {{ $.Values.packageMirror.service.type }}
+  {{- with $.Values.packageMirror.service.sessionAffinity }}
+  sessionAffinity: {{ . }}
+  {{- end }}
+  ports:
+    - name: http
+      port: {{ $.Values.packageMirror.service.port }}
+      targetPort: {{ .portName }}
+      protocol: {{ .protocol }}
+  selector:
+    {{- include "buildkit-service.packageMirror.selectorLabels" $ | nindent 4 }}
+{{- end }}
+---
+# git mirror Service. When git.standalone is true the git-cache runs in its own
+# Deployment (decoupled from the shared pod so its disk/OOM eviction no longer
+# kills apt-yum/pip/npm), so the selector must target the git Deployment's pods.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.packageMirror.git.serviceName }}
+  namespace: {{ include "buildkit-service.packageMirror.namespace" . }}
+  labels:
+    {{- include "buildkit-service.packageMirror.labels" . | nindent 4 }}
+    app.kubernetes.io/component: {{ .Values.packageMirror.git.serviceName }}
+spec:
+  type: {{ .Values.packageMirror.service.type }}
+  {{- with .Values.packageMirror.service.sessionAffinity }}
+  sessionAffinity: {{ . }}
+  {{- end }}
+  ports:
+    - name: http
+      port: {{ .Values.packageMirror.service.port }}
+      targetPort: {{ .Values.packageMirror.git.portName }}
+      protocol: {{ .Values.packageMirror.git.protocol }}
+  selector:
+    {{- if .Values.packageMirror.git.standalone }}
+    {{- include "buildkit-service.packageMirror.gitSelectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: git
+    {{- else }}
+    {{- include "buildkit-service.packageMirror.selectorLabels" . | nindent 4 }}
+    {{- end }}
+{{- $selectedMirrors := include "buildkit-service.packageMirror.selectedRegistryMirrors" . | fromYamlArray -}}
+{{- range $selectedMirrors }}
+{{- if .enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .serviceName }}
+  namespace: {{ include "buildkit-service.packageMirror.namespace" $ }}
+  labels:
+    {{- include "buildkit-service.packageMirror.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ .serviceName }}
+spec:
+  type: {{ $.Values.packageMirror.service.type }}
+  {{- with $.Values.packageMirror.service.sessionAffinity }}
+  sessionAffinity: {{ . }}
+  {{- end }}
+  ports:
+    - name: http
+      port: {{ $.Values.packageMirror.service.port }}
+      targetPort: {{ .portName }}
+      protocol: {{ $.Values.packageMirror.registry.protocol }}
+  selector:
+    {{- include "buildkit-service.packageMirror.registrySelectorLabels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ .serviceName }}
+{{- if $.Values.packageMirror.registry.cacheMetrics.enabled }}
+---
+# Headless metrics service: resolves to every replica's pod IP so the
+# metrics-aggregator can scrape and sum each replica's Distribution request
+# counters (debug port) and cache-usage sidecar.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ printf "%s-metrics" .serviceName }}
+  namespace: {{ include "buildkit-service.packageMirror.namespace" $ }}
+  labels:
+    {{- include "buildkit-service.packageMirror.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ .serviceName }}
+spec:
+  clusterIP: None
+  ports:
+    - name: {{ .debugPortName }}
+      port: {{ .debugPort }}
+      targetPort: {{ .debugPortName }}
+      protocol: {{ $.Values.packageMirror.registry.protocol }}
+    - name: {{ $.Values.packageMirror.registry.cacheMetrics.portName }}
+      port: {{ $.Values.packageMirror.registry.cacheMetrics.port }}
+      targetPort: {{ $.Values.packageMirror.registry.cacheMetrics.portName }}
+      protocol: {{ $.Values.packageMirror.registry.protocol }}
+  selector:
+    {{- include "buildkit-service.packageMirror.registrySelectorLabels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ .serviceName }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if .Values.packageMirror.metrics.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.packageMirror.metrics.serviceName }}
+  namespace: {{ include "buildkit-service.packageMirror.namespace" . }}
+  labels:
+    {{- include "buildkit-service.packageMirror.labels" . | nindent 4 }}
+    app.kubernetes.io/component: {{ .Values.packageMirror.metrics.serviceName }}
+spec:
+  type: {{ .Values.packageMirror.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.packageMirror.service.port }}
+      targetPort: {{ .Values.packageMirror.metrics.portName }}
+      protocol: {{ .Values.packageMirror.metrics.protocol }}
+  selector:
+    {{- include "buildkit-service.packageMirror.selectorLabels" . | nindent 4 }}
+{{- end }}
+
+{{- end }}

@@ -1,0 +1,270 @@
+{{- if .Values.packageMirror.enabled }}
+{{- $selectedMirrors := include "buildkit-service.packageMirror.selectedRegistryMirrors" . | fromYamlArray -}}
+{{- $topologySpread := .Values.packageMirror.topologySpread | default dict -}}
+{{- if gt (len $selectedMirrors) 0 }}
+{{- range $selectedMirrors }}
+---
+apiVersion: apps/v1
+# StatefulSet so each replica can own an RWO cache claim through
+# volumeClaimTemplates. Fewer replicas reduce cache partitioning and can improve
+# the hit rate for repeated base images and layers.
+kind: StatefulSet
+metadata:
+  name: {{ include "buildkit-service.packageMirror.fullname" $ }}-registry-{{ .name }}
+  namespace: {{ include "buildkit-service.packageMirror.namespace" $ }}
+  labels:
+    {{- include "buildkit-service.packageMirror.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ .serviceName }}
+spec:
+  serviceName: {{ .serviceName }}
+  podManagementPolicy: Parallel
+  replicas: {{ default $.Values.packageMirror.deployment.replicaCount $.Values.packageMirror.registry.deployment.replicaCount }}
+  updateStrategy:
+    type: RollingUpdate
+  {{- if $.Values.packageMirror.registry.persistence.enabled }}
+  # The PVCs only hold cache; drop them with the StatefulSet so scale-downs
+  # and uninstalls do not leak paid disks.
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Delete
+    whenScaled: Delete
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "buildkit-service.packageMirror.registrySelectorLabels" $ | nindent 6 }}
+      app.kubernetes.io/component: {{ .serviceName }}
+  template:
+    metadata:
+      labels:
+        {{- include "buildkit-service.packageMirror.registrySelectorLabels" $ | nindent 8 }}
+        app.kubernetes.io/component: {{ .serviceName }}
+        {{- with $.Values.packageMirror.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/package-mirror-configmap.yaml") $ | sha256sum }}
+        {{- with $.Values.packageMirror.registry.configRevision }}
+        package-mirror/config-revision: {{ . | quote }}
+        {{- end }}
+        {{- with $.Values.packageMirror.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with $.Values.packageMirror.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml $.Values.packageMirror.podSecurityContext | nindent 8 }}
+      containers:
+        - name: {{ printf "registry-%s" .name }}
+          image: {{ printf "%s:%s" $.Values.packageMirror.registry.image.repository $.Values.packageMirror.registry.image.tag }}
+          imagePullPolicy: {{ $.Values.packageMirror.registry.image.pullPolicy }}
+          securityContext:
+            {{- toYaml $.Values.packageMirror.securityContext | nindent 12 }}
+          ports:
+            - name: {{ .portName }}
+              containerPort: {{ .port }}
+              protocol: {{ $.Values.packageMirror.registry.protocol }}
+            - name: {{ .debugPortName }}
+              containerPort: {{ .debugPort }}
+              protocol: {{ $.Values.packageMirror.registry.protocol }}
+          livenessProbe:
+            tcpSocket:
+              port: {{ .portName }}
+            initialDelaySeconds: {{ $.Values.packageMirror.registry.livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ $.Values.packageMirror.registry.livenessProbe.periodSeconds }}
+            timeoutSeconds: {{ $.Values.packageMirror.registry.livenessProbe.timeoutSeconds }}
+            failureThreshold: {{ $.Values.packageMirror.registry.livenessProbe.failureThreshold }}
+            successThreshold: {{ $.Values.packageMirror.registry.livenessProbe.successThreshold }}
+          readinessProbe:
+            tcpSocket:
+              port: {{ .portName }}
+            initialDelaySeconds: {{ $.Values.packageMirror.registry.readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ $.Values.packageMirror.registry.readinessProbe.periodSeconds }}
+            timeoutSeconds: {{ $.Values.packageMirror.registry.readinessProbe.timeoutSeconds }}
+            failureThreshold: {{ $.Values.packageMirror.registry.readinessProbe.failureThreshold }}
+            successThreshold: {{ $.Values.packageMirror.registry.readinessProbe.successThreshold }}
+          resources:
+            {{- toYaml (default $.Values.packageMirror.resources $.Values.packageMirror.registry.resources) | nindent 12 }}
+          volumeMounts:
+            {{- if $.Values.packageMirror.registry.persistence.enabled }}
+            - name: {{ printf "cache-registry-%s" .name }}
+              mountPath: /var/lib/registry
+            {{- else if $.Values.packageMirror.persistence.enabled }}
+            - name: {{ include "buildkit-service.packageMirror.cacheVolumeName" $ }}
+              mountPath: /var/lib/registry
+              subPath: {{ printf "registry-%s" .name }}
+            {{- else }}
+            - name: {{ printf "cache-registry-%s" .name }}
+              mountPath: /var/lib/registry
+            {{- end }}
+            - name: registry-config
+              # Distribution v3 reads /etc/distribution/config.yml (v2 used
+              # /etc/docker/registry/config.yml).
+              mountPath: /etc/distribution/config.yml
+              subPath: config.yml
+              readOnly: true
+        {{- if $.Values.packageMirror.registry.cacheMetrics.enabled }}
+        # Cache-usage exporter: reports registry_mirror cache used/total bytes
+        # from this mirror's /var/lib/registry volume.
+        - name: cache-metrics
+          image: {{ printf "%s:%s" $.Values.packageMirror.metrics.image.repository $.Values.packageMirror.metrics.image.tag }}
+          imagePullPolicy: {{ $.Values.packageMirror.metrics.image.pullPolicy }}
+          securityContext:
+            {{- toYaml $.Values.packageMirror.securityContext | nindent 12 }}
+          command:
+            - python3
+            - /etc/package-mirror/dir-size-exporter.py
+          env:
+            - name: METRICS_PORT
+              value: {{ $.Values.packageMirror.registry.cacheMetrics.port | quote }}
+            - name: METRIC_PREFIX
+              value: registry_mirror
+            - name: TARGETS
+              value: {{ printf "%s=/var/lib/registry" .name | quote }}
+            - name: DIR_STATS_TTL_SECONDS
+              value: {{ $.Values.packageMirror.registry.cacheMetrics.dirStatsTtlSeconds | quote }}
+          ports:
+            - name: {{ $.Values.packageMirror.registry.cacheMetrics.portName }}
+              containerPort: {{ $.Values.packageMirror.registry.cacheMetrics.port }}
+              protocol: {{ $.Values.packageMirror.registry.protocol }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ $.Values.packageMirror.registry.cacheMetrics.portName }}
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 3
+            failureThreshold: 3
+            successThreshold: 1
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ $.Values.packageMirror.registry.cacheMetrics.portName }}
+            initialDelaySeconds: 5
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+            successThreshold: 1
+          resources:
+            {{- toYaml $.Values.packageMirror.metrics.resources | nindent 12 }}
+          volumeMounts:
+            {{- if $.Values.packageMirror.registry.persistence.enabled }}
+            - name: {{ printf "cache-registry-%s" .name }}
+              mountPath: /var/lib/registry
+              readOnly: true
+            {{- else if $.Values.packageMirror.persistence.enabled }}
+            - name: {{ include "buildkit-service.packageMirror.cacheVolumeName" $ }}
+              mountPath: /var/lib/registry
+              subPath: {{ printf "registry-%s" .name }}
+              readOnly: true
+            {{- else }}
+            - name: {{ printf "cache-registry-%s" .name }}
+              mountPath: /var/lib/registry
+              readOnly: true
+            {{- end }}
+            - name: {{ include "buildkit-service.packageMirror.configVolumeName" $ }}
+              mountPath: /etc/package-mirror/dir-size-exporter.py
+              subPath: dir-size-exporter.py
+              readOnly: true
+        {{- end }}
+        {{- if and $.Values.packageMirror.cacheGc.enabled $.Values.packageMirror.registry.gc.enabled }}
+        # High-water cache janitor for Docker Distribution pull-through cache.
+        - name: cache-gc
+          image: {{ printf "%s:%s" $.Values.packageMirror.cacheGc.image.repository $.Values.packageMirror.cacheGc.image.tag }}
+          imagePullPolicy: {{ $.Values.packageMirror.cacheGc.image.pullPolicy }}
+          securityContext:
+            {{- toYaml $.Values.packageMirror.securityContext | nindent 12 }}
+          command:
+            - python3
+            - /etc/package-mirror/cache-gc.py
+          env:
+            - name: CACHE_GC_TARGETS
+              value: {{ printf "%s=/gc/registry:%s:%s" .name (toString $.Values.packageMirror.registry.gc.maxBytes) (toString $.Values.packageMirror.registry.gc.targetRatio) | quote }}
+            - name: CACHE_GC_INTERVAL_SECONDS
+              value: {{ $.Values.packageMirror.cacheGc.intervalSeconds | quote }}
+            - name: CACHE_GC_MIN_AGE_SECONDS
+              value: {{ $.Values.packageMirror.cacheGc.minAgeSeconds | quote }}
+            - name: CACHE_GC_EXCLUDE_REGEX
+              value: {{ $.Values.packageMirror.cacheGc.excludeRegex | quote }}
+          resources:
+            {{- toYaml $.Values.packageMirror.cacheGc.resources | nindent 12 }}
+          volumeMounts:
+            {{- if $.Values.packageMirror.registry.persistence.enabled }}
+            - name: {{ printf "cache-registry-%s" .name }}
+              mountPath: /gc/registry
+            {{- else if $.Values.packageMirror.persistence.enabled }}
+            - name: {{ include "buildkit-service.packageMirror.cacheVolumeName" $ }}
+              mountPath: /gc/registry
+              subPath: {{ printf "registry-%s" .name }}
+            {{- else }}
+            - name: {{ printf "cache-registry-%s" .name }}
+              mountPath: /gc/registry
+            {{- end }}
+            - name: {{ include "buildkit-service.packageMirror.configVolumeName" $ }}
+              mountPath: /etc/package-mirror/cache-gc.py
+              subPath: cache-gc.py
+        {{- end }}
+      {{- with $.Values.packageMirror.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $.Values.packageMirror.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if (get $topologySpread "enabled") }}
+      topologySpreadConstraints:
+        - maxSkew: {{ get $topologySpread "maxSkew" | default 1 }}
+          topologyKey: {{ get $topologySpread "topologyKey" | default "kubernetes.io/hostname" | quote }}
+          whenUnsatisfiable: {{ get $topologySpread "whenUnsatisfiable" | default "ScheduleAnyway" }}
+          labelSelector:
+            matchLabels:
+              {{- include "buildkit-service.packageMirror.registrySelectorLabels" $ | nindent 14 }}
+              app.kubernetes.io/component: {{ .serviceName }}
+      {{- end }}
+      {{- with $.Values.packageMirror.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      volumes:
+        - name: registry-config
+          secret:
+            secretName: {{ include "buildkit-service.packageMirror.fullname" $ }}-registry-{{ .name }}-config
+        - name: {{ include "buildkit-service.packageMirror.configVolumeName" $ }}
+          configMap:
+            name: {{ include "buildkit-service.packageMirror.fullname" $ }}
+        {{- if $.Values.packageMirror.persistence.enabled }}
+        - name: {{ include "buildkit-service.packageMirror.cacheVolumeName" $ }}
+          persistentVolumeClaim:
+            claimName: {{ default (include "buildkit-service.packageMirror.fullname" $) $.Values.packageMirror.persistence.existingClaim }}
+        {{- end }}
+        {{- if not (or $.Values.packageMirror.registry.persistence.enabled $.Values.packageMirror.persistence.enabled) }}
+        - name: {{ printf "cache-registry-%s" .name }}
+          emptyDir:
+            {{- with $.Values.packageMirror.persistence.emptyDir.registrySizeLimit }}
+            sizeLimit: {{ . }}
+            {{- end }}
+        {{- end }}
+  {{- if $.Values.packageMirror.registry.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: {{ printf "cache-registry-%s" .name }}
+        {{- with $.Values.packageMirror.registry.persistence.annotations }}
+        annotations:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+      spec:
+        accessModes:
+          {{- toYaml $.Values.packageMirror.registry.persistence.accessModes | nindent 10 }}
+        resources:
+          requests:
+            storage: {{ $.Values.packageMirror.registry.persistence.size }}
+        {{- with $.Values.packageMirror.registry.persistence.storageClassName }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+  {{- end }}
+      {{- end }}
+{{- end }}
+
+{{- end }}

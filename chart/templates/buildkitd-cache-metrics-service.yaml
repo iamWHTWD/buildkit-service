@@ -1,0 +1,22 @@
+{{- if and .Values.buildkit.enabled .Values.buildkitdCacheMetrics.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "buildkit-service.fullname" . }}-cache-metrics
+  namespace: {{ include "buildkit-service.namespace" . }}
+  labels:
+    {{- include "buildkit-service.labels" . | nindent 4 }}
+    app.kubernetes.io/component: buildkitd-cache-metrics
+spec:
+  # Headless so the metrics-aggregator can resolve every buildkitd pod IP and
+  # scrape each cache sidecar directly.
+  clusterIP: None
+  ports:
+    - name: {{ .Values.buildkitdCacheMetrics.portName }}
+      port: {{ .Values.buildkitdCacheMetrics.port }}
+      protocol: TCP
+      targetPort: {{ .Values.buildkitdCacheMetrics.portName }}
+  selector:
+    {{- include "buildkit-service.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: buildkitd
+{{- end }}

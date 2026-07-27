@@ -1,0 +1,21 @@
+{{- if and .Values.buildkit.enabled .Values.buildctlDaemonCanary.enabled }}
+{{- $cfg := .Values.buildctlDaemonCanary -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "buildkit-service.buildctlDaemonCanaryName" . }}
+  namespace: {{ include "buildkit-service.namespace" . }}
+  labels:
+    {{- include "buildkit-service.labels" . | nindent 4 }}
+    app.kubernetes.io/component: buildctl-daemon-canary
+spec:
+  type: {{ $cfg.service.type }}
+  ports:
+    - name: {{ $cfg.container.portName }}
+      port: {{ $cfg.service.port }}
+      protocol: {{ $cfg.service.protocol }}
+      targetPort: {{ $cfg.service.targetPort }}
+  selector:
+    {{- include "buildkit-service.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: buildctl-daemon-canary
+{{- end }}

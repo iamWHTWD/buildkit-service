@@ -1,0 +1,25 @@
+{{- if and .Values.buildkit.enabled .Values.buildctlDaemon.enabled .Values.buildctlDaemon.publicService.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.buildctlDaemon.publicService.name | quote }}
+  namespace: {{ include "buildkit-service.namespace" . }}
+  labels:
+    {{- include "buildkit-service.labels" . | nindent 4 }}
+    app.kubernetes.io/component: buildctl-daemon
+  {{- with .Values.buildctlDaemon.publicService.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.buildctlDaemon.publicService.type }}
+  externalTrafficPolicy: {{ .Values.buildctlDaemon.publicService.externalTrafficPolicy }}
+  ports:
+    - name: {{ .Values.buildctlDaemon.container.portName }}
+      port: {{ .Values.buildctlDaemon.publicService.port }}
+      protocol: {{ .Values.buildctlDaemon.publicService.protocol }}
+      targetPort: {{ .Values.buildctlDaemon.publicService.targetPort }}
+  selector:
+    {{- include "buildkit-service.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: buildctl-daemon
+{{- end }}

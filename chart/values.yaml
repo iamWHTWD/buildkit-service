@@ -1,0 +1,983 @@
+namespaceOverride: buildkit-service
+
+# BuildKit daemon image with Nydus image format support.
+image: ghcr.io/nydusaccelerator/buildkit:v0.31.1-nydus
+
+
+imagePullSecrets:
+  create: true
+  name: buildkit-registry
+
+# Master switch for all BuildKit-side workloads (buildkitd Deployment/Service,
+# image-pull Secret, buildkitd.toml ConfigMap, buildctl-daemon and the buildkitd
+# cache-metrics sidecar Service/ConfigMap). Set to false to install only the
+# package mirror from this chart, e.g.:
+#   helm upgrade --install package-mirror ./chart \
+#     --namespace package-mirror --create-namespace \
+#     --set buildkit.enabled=false
+# packageMirror.enabled (default true) independently gates the package mirror.
+buildkit:
+  enabled: true
+
+registries:
+  # Add a new image registry here once. The chart derives docker auth,
+  # buildkitd registry mirror config and package-mirror registry resources from
+  # this section. Any OCI registry works: Docker Hub, ghcr.io, Harbor, or a
+  # cloud-hosted registry (Alibaba Cloud ACR, AWS ECR, Google Artifact
+  # Registry, Azure ACR, ...).
+  - name: dockerhub
+    host: docker.io
+    authHost: https://index.docker.io/v1/
+    # Explicit cross-host Bearer token endpoints trusted for this registry.
+    # Other registries default to same-host token endpoints only.
+    tokenHosts:
+      - auth.docker.io
+    remoteUrl: https://registry-1.docker.io
+    mirror:
+      serviceName: registry-dockerhub
+      always: true
+      enabled: true
+  # Example of a private registry entry:
+  # - name: my-registry
+  #   host: registry.example.com
+  #   # Cross-host Bearer token endpoints, if the registry uses a separate
+  #   # auth service (for example dockerauth.<region>.aliyuncs.com for ACR).
+  #   tokenHosts:
+  #     - auth.registry.example.com
+  #   remoteUrl: https://registry.example.com
+  #   mirror:
+  #     serviceName: registry-my-registry
+  #     enabled: true
+  #     # Create a mirror even when this registry does not host a chart image.
+  #     always: true
+
+# Optional buildkitd.toml. Enable to configure registry mirrors used by
+# Dockerfile FROM pulls. Mirror strings must not include http:// or https://;
+# set per-mirror scheme via registryConfigs (for example http=true for the
+# package-mirror registry Service).
+buildkitdConfig:
+  enabled: true
+  path: /etc/buildkit/buildkitd.toml
+  # Extra manual entries. Mirrors for registries are rendered
+  # automatically.
+  registryMirrors: []
+  registryConfigs: []
+  system:
+    maxRegistryConcurrency: 64
+  worker:
+    oci:
+      gc: true
+      # gckeepstorage is the default BuildKit GC storage target in MB. Keep it
+      # well below volumes[].lib-buildkit.emptyDir.sizeLimit so short bursts do
+      # not make kubelet evict buildkitd before BuildKit GC can prune cache.
+      gcKeepStorageMB: 10240
+      gcPolicies:
+        # Keep short-lived source/cache-mount/git checkout records small.
+        - keepBytes: 2147483648 # 2GiB
+          keepDuration: 86400 # 24h
+          filters:
+            - type==source.local
+            - type==exec.cachemount
+            - type==source.git.checkout
+        # Global cache ceiling for all records.
+        - all: true
+          keepBytes: 10737418240 # 10GiB
+
+# Cache-usage exporter sidecar for each buildkitd pod. buildkitd in this fork
+# exposes no cumulative build/cache metrics, so cache size is measured directly
+# from the lib-buildkit volume and surfaced via a headless metrics Service that
+# the metrics-aggregator scrapes per pod.
+buildkitdCacheMetrics:
+  enabled: true
+  image:
+    repository: python
+    tag: "3.12-slim"
+    pullPolicy: IfNotPresent
+  portName: cache-metrics
+  port: 9300
+  protocol: TCP
+  # Directory measured for used bytes; total bytes comes from its filesystem.
+  cacheDir: /var/lib/buildkit
+  dirStatsTtlSeconds: 60
+  resources:
+    limits:
+      cpu: "250m"
+      memory: 256Mi
+      ephemeral-storage: 1Gi
+
+# Self-contained metrics aggregator. Scrapes the buildkitd cache sidecars,
+# buildctl-daemon, package-mirror and registry-mirror endpoints and re-exposes a
+# single unified /metrics on a ClusterIP Service in the buildkit-service
+# namespace. No Prometheus dependency.
+metricsAggregator:
+  enabled: true
+  replicas: 1
+  clusterDomain: cluster.local
+  image:
+    repository: python
+    tag: "3.12-slim"
+    pullPolicy: IfNotPresent
+  portName: metrics
+  port: 9090
+  scrapeTtlSeconds: 15
+  scrapeTimeoutSeconds: 5
+  service:
+    type: ClusterIP
+    port: 80
+  resources:
+    limits:
+      cpu: "250m"
+      memory: 256Mi
+      ephemeral-storage: 1Gi
+
+buildctlDaemon:
+  enabled: true
+  replicas: 1
+  # Image built from this repository. It contains both buildctl-daemon and
+  # buildctl-batch on top of the Nydus-enabled BuildKit image.
+  image: ghcr.io/inclusionai/buildkit-service/buildctl-daemon:latest
+  imagePullPolicy: IfNotPresent
+  buildkitdAddr: tcp://buildkit-service.buildkit-service.svc:9094
+  buildkitTLS:
+    enabled: false
+    secretName: ""
+    serverName: ""
+  listen: 0.0.0.0:8080
+  workDir: /tmp/buildctl-daemon
+  # Requests that omit the optional `mode` form field keep the legacy API and
+  # are assigned to this mode. Leave modes empty to preserve the legacy
+  # scheduler exactly. To enable independent queues, configure for example:
+  # modes:
+  #   default_mode:
+  #     concurrency: 200
+  #     routingEnabled: false
+  #   routing_mode:
+  #     concurrency: 400
+  #     routingEnabled: true
+  defaultMode: default_mode
+  modes: {}
+  # Registry prefixes used by modes with routingEnabled=true (2-32 unique
+  # entries). Rendezvous hashing selects one prefix using the complete
+  # source-context SHA-256, sharding pushes across registries. Keep this empty
+  # until explicit modes and the registry pool are ready for rollout. Example:
+  # routingTargets:
+  #   - registry-a.example.com/myorg
+  #   - registry-b.example.com/myorg
+  routingTargets: []
+  # HTTPS hosts used by the routing registries' Bearer challenges. The image
+  # checker reuses routingTargets as its registry allowlist and the existing
+  # Docker auth Secret for credentials; shared token hosts are listed once.
+  registryTokenHosts: []
+  keepTTL: 2h
+  maxLogBytes: 1048576
+  maxRequestBytes: 536870912
+  maxExtractedBytes: 4294967296
+  maxArchiveFiles: 100000
+  maxRetainedTasks: 100
+  maxWorkDirBytes: 8589934592
+  uploadReadTimeout: 5m
+  addrConcurrency: 5
+  # Global cap on builds running concurrently across ALL buildkitd addresses;
+  # extra tasks stay queued until a slot frees. Protects shared dependencies
+  # (registry mirrors, upstream registries) from burst submissions. 0 disables
+  # the global limit (per-address addrConcurrency still applies).
+  maxConcurrency: 100
+  registryCheckTimeout: 30s
+  registryCheckConcurrency: 32
+  # Docker config Secret used by build and HEAD image registry authentication.
+  # Defaults to imagePullSecrets.name; set explicitly when imagePullSecrets is a list.
+  registryAuthSecretName: ""
+  rlimitNoFile: 1048576
+  pprof:
+    enabled: false
+    listen: 0.0.0.0:6060
+    portName: pprof
+    port: 6060
+    protocol: TCP
+  auth:
+    # Bearer token required by the HTTP API. REQUIRED: set your own random
+    # secret at install time, for example:
+    #   --set buildctlDaemon.auth.token=$(openssl rand -hex 32)
+    token: ""
+  container:
+    name: buildctl-daemon
+    command:
+      - buildctl-daemon
+    portName: http
+    port: 8080
+    protocol: TCP
+    securityContext:
+      capabilities:
+        add:
+          - SYS_RESOURCE
+    livenessProbe:
+      failureThreshold: 3
+      initialDelaySeconds: 10
+      periodSeconds: 20
+      successThreshold: 1
+      timeoutSeconds: 3
+    readinessProbe:
+      failureThreshold: 3
+      initialDelaySeconds: 3
+      periodSeconds: 10
+      successThreshold: 1
+      timeoutSeconds: 3
+  service:
+    type: ClusterIP
+    port: 80
+    targetPort: http
+    protocol: TCP
+  publicService:
+    # Disabled by default: the API uses Bearer authentication but does not
+    # terminate TLS. Prefer port-forwarding or an HTTPS ingress/reverse proxy.
+    enabled: false
+    name: buildctl-daemon-public
+    type: LoadBalancer
+    port: 80
+    targetPort: http
+    protocol: TCP
+    externalTrafficPolicy: Cluster
+    # Cloud-specific LoadBalancer annotations, for example:
+    #   AWS:           service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+    #   Alibaba Cloud: service.beta.kubernetes.io/alibaba-cloud-loadbalancer-type: "nlb"
+    #   GCP:           cloud.google.com/l4-rbs: "enabled"
+    annotations: {}
+  resources:
+    limits:
+      cpu: "2"
+      memory: 4Gi
+      ephemeral-storage: 10Gi
+    requests:
+      cpu: "100m"
+      memory: 256Mi
+      ephemeral-storage: 1Gi
+  podSecurityContext: {}
+  podAnnotations: {}
+  podLabels: {}
+  tolerations: []
+  affinity: {}
+
+# Isolated long-lived endpoint for validating buildctl-daemon changes against
+# the real BuildKit cluster. It is disabled by default and uses a distinct Pod
+# component label, so the production daemon Services never select canary Pods.
+buildctlDaemonCanary:
+  enabled: false
+  replicas: 1
+  # Required for a real rollout. Keep the production image unchanged and point
+  # this field at an immutable canary tag containing the candidate binary.
+  image: ""
+  imagePullPolicy: IfNotPresent
+  buildkitdAddr: tcp://buildkit-service.buildkit-service.svc:9094
+  buildkitTLS:
+    enabled: false
+    secretName: ""
+    serverName: ""
+  listen: 0.0.0.0:8080
+  workDir: /tmp/buildctl-daemon-canary
+  defaultMode: default_mode
+  # Example:
+  # modes:
+  #   default_mode:
+  #     concurrency: 1
+  #     routingEnabled: false
+  #   routing_mode:
+  #     concurrency: 1
+  #     routingEnabled: true
+  modes: {}
+  # Same registry-prefix format and Rendezvous routing as buildctlDaemon.
+  routingTargets: []
+  registryTokenHosts: []
+  keepTTL: 2h
+  maxLogBytes: 1048576
+  maxRequestBytes: 536870912
+  maxExtractedBytes: 4294967296
+  maxArchiveFiles: 100000
+  maxRetainedTasks: 20
+  maxWorkDirBytes: 2147483648
+  uploadReadTimeout: 5m
+  addrConcurrency: 1
+  maxConcurrency: 2
+  registryCheckTimeout: 30s
+  registryCheckConcurrency: 4
+  rlimitNoFile: 65536
+  # Empty values reuse the production daemon token and registry-auth Secrets.
+  tokenSecretName: ""
+  registryAuthSecretName: ""
+  container:
+    name: buildctl-daemon-canary
+    command:
+      - buildctl-daemon
+    portName: http
+    port: 8080
+    protocol: TCP
+    securityContext:
+      capabilities:
+        add:
+          - SYS_RESOURCE
+    livenessProbe:
+      failureThreshold: 3
+      initialDelaySeconds: 10
+      periodSeconds: 20
+      successThreshold: 1
+      timeoutSeconds: 3
+    readinessProbe:
+      failureThreshold: 3
+      initialDelaySeconds: 3
+      periodSeconds: 10
+      successThreshold: 1
+      timeoutSeconds: 3
+  service:
+    type: ClusterIP
+    port: 80
+    targetPort: http
+    protocol: TCP
+  publicService:
+    enabled: false
+    name: buildctl-daemon-canary-public
+    type: LoadBalancer
+    port: 80
+    targetPort: http
+    protocol: TCP
+    externalTrafficPolicy: Cluster
+    # Cloud-specific LoadBalancer annotations; see buildctlDaemon.publicService.
+    annotations: {}
+  resources:
+    limits:
+      cpu: "4"
+      memory: 8Gi
+      ephemeral-storage: 100Gi
+    requests:
+      cpu: "500m"
+      memory: 1Gi
+      ephemeral-storage: 10Gi
+  podSecurityContext: {}
+  podAnnotations: {}
+  podLabels: {}
+  tolerations:
+    - key: owner
+      operator: Equal
+      value: buildkitd
+      effect: NoSchedule
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: owner
+                operator: In
+                values:
+                  - buildkitd
+
+service:
+  type: ClusterIP
+  port: 9094
+  targetPort: tcp
+  clusterIP: None
+  clusterIPs:
+    - None
+  internalTrafficPolicy: Cluster
+  ipFamilies:
+    - IPv4
+  ipFamilyPolicy: SingleStack
+  sessionAffinity: None
+
+container:
+  name: buildkitd
+  command:
+    - buildkitd
+    - --addr
+    - tcp://0.0.0.0:9094
+  portName: tcp
+  port: 9094
+  protocol: TCP
+  securityContext:
+    privileged: true
+  # buildkitd can need over a minute to initialize worker state on busy nodes or
+  # after cache churn. startupProbe gates liveness during that window so kubelet
+  # does not kill it before tcp://:9094 starts accepting connections.
+  startupProbe:
+    enabled: true
+    failureThreshold: 30
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    successThreshold: 1
+    timeoutSeconds: 3
+  livenessProbe:
+    failureThreshold: 3
+    initialDelaySeconds: 15
+    periodSeconds: 20
+    successThreshold: 1
+    timeoutSeconds: 3
+  readinessProbe:
+    failureThreshold: 3
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    successThreshold: 1
+    timeoutSeconds: 3
+
+resources:
+  limits:
+    cpu: "4"
+    memory: 8Gi
+    ephemeral-storage: 20Gi
+  requests:
+    cpu: "500m"
+    memory: 1Gi
+    ephemeral-storage: 10Gi
+podSecurityContext: {}
+
+tolerations: []
+
+affinity: {}
+
+scheduling:
+  singlePodPerNode: false
+
+volumes:
+  - name: run-buildkit
+    emptyDir: {}
+  - name: lib-buildkit
+    emptyDir:
+      sizeLimit: 15Gi
+
+volumeMounts:
+  - name: run-buildkit
+    mountPath: /run/buildkit
+  - name: lib-buildkit
+    mountPath: /var/lib/buildkit
+
+deployment:
+  replicas: 1
+  progressDeadlineSeconds: 600
+  revisionHistoryLimit: 10
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+
+podAnnotations: {}
+podLabels: {}
+restartPolicy: Always
+dnsPolicy: ClusterFirst
+schedulerName: default-scheduler
+terminationGracePeriodSeconds: 30
+terminationMessagePath: /dev/termination-log
+terminationMessagePolicy: File
+
+packageMirror:
+  enabled: true
+  namespaceOverride: package-mirror
+
+  networkPolicy:
+    enabled: true
+    # BuildKit build containers originate from the build service namespace.
+    # Add namespaces here only when their Pods must call cache Services directly.
+    allowedNamespaces:
+      - buildkit-service
+  
+  nameOverride: ""
+  fullnameOverride: ""
+  
+  imagePullSecrets: []
+  
+  deployment:
+    # Multiple replicas shard clients via Service sessionAffinity=ClientIP. Each
+    # replica has its own local cache; this is intended for high-concurrency load
+    # distribution rather than shared warm-cache efficiency.
+    replicaCount: 1
+    # Caches are per-pod emptyDir, so RollingUpdate can keep the service
+    # available while Pods are replaced.
+    strategy:
+      type: RollingUpdate
+      rollingUpdate:
+        maxUnavailable: 25%
+        maxSurge: 25%
+
+  podDisruptionBudget:
+    enabled: false
+    maxUnavailable: 1
+
+  topologySpread:
+    enabled: false
+    maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+  
+  # Fallback resource limits applied only if a backend-specific resources block is
+  # not set. For production sizing, prefer pip.resources / npm.resources /
+  # aptYum.resources below.
+  resources:
+    # requests:
+    #   cpu: "4"
+    #   memory: 4Gi
+    #   ephemeral-storage: 500Gi
+    limits:
+      cpu: "2"
+      memory: 3Gi
+      ephemeral-storage: 40Gi
+  
+  tolerations: []
+  
+  # apt/pip/npm (and registry) main pods. Pinned to the package-mirror node pool.
+  # A required pod anti-affinity keeps them OFF any node already running a git
+  # mirror pod (component=git), so the git cache's eviction/churn I/O
+  # can never starve the apt-yum container sharing a node's disk. This is a pure
+  # pod-anti-affinity partition: no node labels and no hard-coded node names, so
+  # it self-adjusts as the node pool changes. Paired with git.affinity's mirror
+  # rule below (git avoids apt nodes), the two workloads stay on disjoint nodes.
+  affinity: {}
+  
+  # One Service per cache backend, so each gets its own DNS name:
+  #   pip.<ns>.svc.cluster.local / npm.<ns>.svc.cluster.local /
+  #   apt-yum.<ns>.svc.cluster.local / git.<ns>.svc.cluster.local
+  # All Services listen on the same port and forward to the matching container.
+  service:
+    type: ClusterIP
+    port: 80
+    # Pin each client to one backend replica. Harmless with a single replica, but
+    # if you ever scale up it keeps a client's requests cache-coherent so apt/yum
+    # downloads don't fail with "File has unexpected size / Mirror sync in progress".
+    sessionAffinity: ClientIP
+  
+  # pip cache, served by proxpi.
+  pip:
+    serviceName: pip
+    image:
+      repository: epicwink/proxpi
+      tag: "1.3.0"
+      pullPolicy: IfNotPresent
+    portName: pip
+    port: 5000
+    protocol: TCP
+    # proxpi upstream recommends threads rather than multiple processes because
+    # index/file cache bookkeeping is in-process and is not shared by workers.
+    gunicorn:
+      threads: 8
+      timeoutSeconds: 120
+      gracefulTimeoutSeconds: 30
+    resources:
+      limits:
+        cpu: "1"
+        memory: 1Gi
+        ephemeral-storage: 2Gi
+    env:
+      # Upstream PyPI index. Point at a geographically close mirror if needed.
+      indexUrl: https://pypi.org/simple/
+      extraIndexUrls: []
+      extraIndexTtls: []
+      indexTtlSeconds: 1800
+      # Keep cacheSize WELL below the cache-pip emptyDir sizeLimit / ephemeral
+      # limit: proxpi evicts lazily and index/tmp files are not counted, so
+      # cacheSize == sizeLimit risks kubelet eviction.
+      cacheSize: "1073741824"
+      disableIndexSslVerification: false
+      downloadTimeoutSeconds: 2
+      connectTimeoutSeconds: 3.1
+      readTimeoutSeconds: 20
+      loggingLevel: INFO
+    livenessProbe:
+      path: /health
+      initialDelaySeconds: 30
+      periodSeconds: 30
+      timeoutSeconds: 10
+      failureThreshold: 10
+      successThreshold: 1
+    readinessProbe:
+      path: /health
+      initialDelaySeconds: 10
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 3
+      successThreshold: 1
+  
+  # npm cache, served by verdaccio acting as a transparent proxy to the upstream registry.
+  npm:
+    serviceName: npm
+    image:
+      repository: verdaccio/verdaccio
+      tag: "6"
+      pullPolicy: IfNotPresent
+    portName: npm
+    port: 4873
+    protocol: TCP
+    env:
+      # Upstream npm registry. Point at a geographically close mirror if needed.
+      upstreamUrl: https://registry.npmjs.org/
+      # Upstream fetch timeout / retry knobs passed to verdaccio uplink config.
+      maxAgeMinutes: 120
+      fetchTimeout: 30s
+      maxFails: 2
+      failTimeout: 5m
+      # Compatibility setting for existing deployments. Real size-based GC is
+      # controlled by npm.gc below and enforced by the cache-gc sidecar.
+      cacheMaxSize: 68719476736
+      nodeOptions: --max-old-space-size=512
+    gc:
+      enabled: true
+      # Keep below persistence.emptyDir.npmSizeLimit / npm ephemeral-storage.
+      # Keep this below npm ephemeral-storage and emptyDir limits. The sidecar
+      # compacts down to targetRatio * maxBytes.
+      # The sidecar deletes oldest cache files once usage crosses this high-water
+      # mark, then compacts down to targetRatio * maxBytes.
+      maxBytes: "1073741824"
+      targetRatio: "0.8"
+    resources:
+      limits:
+        cpu: "1"
+        memory: 1Gi
+        ephemeral-storage: 2Gi
+    livenessProbe:
+      path: /-/ping
+      initialDelaySeconds: 30
+      periodSeconds: 30
+      timeoutSeconds: 10
+      failureThreshold: 10
+      successThreshold: 1
+    readinessProbe:
+      path: /-/ping
+      initialDelaySeconds: 10
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 3
+      successThreshold: 1
+  
+  # apt + yum + apk cache, all served by a single apt-cacher-ng instance on one port.
+  aptYum:
+    serviceName: apt-yum
+    image:
+      # Self-built apt-cacher-ng 3.7.5 (Debian trixie). The old
+      # sameersbn/apt-cacher-ng:3.7.4 image crashes under concurrency
+      # ("buffer overflow detected", exit 139), causing sporadic apt timeouts.
+      # Built from chart/images/apt-cacher-ng/Dockerfile.
+      repository: ghcr.io/inclusionai/buildkit-service/apt-cacher-ng
+      tag: latest
+      pullPolicy: Always
+    portName: apt
+    port: 3142
+    protocol: TCP
+    resources:
+      limits:
+        cpu: "1"
+        memory: 1Gi
+        ephemeral-storage: 2Gi
+    env:
+      # Debian/Ubuntu upstream mirror used as the default remap target for apt.
+      # Must serve /debian and /ubuntu paths on one host. Use HTTP upstreams so
+      # apt-cacher-ng actually caches the packages (HTTPS is tunnelled via
+      # CONNECT and passes through uncached).
+      aptMirror: http://mirrors.edge.kernel.org
+      # CentOS/EPEL/Fedora upstream mirrors used as the default remap targets for yum/dnf.
+      centosMirror: http://mirrors.edge.kernel.org/centos
+      epelMirror: http://mirrors.edge.kernel.org/fedora-epel
+      fedoraMirror: http://mirrors.edge.kernel.org/fedora
+      # Alpine upstream mirror used as the remap target for apk.
+      alpineMirror: http://dl-cdn.alpinelinux.org/alpine
+      # apt-cacher-ng cache expiration in days.
+      expThreshold: 30
+      # apt-cacher-ng uses select(2) internally and can abort with
+      # "bit out of range 0 - FD_SETSIZE on fd_set" if unbounded concurrency
+      # pushes file descriptors above 1023. Cap active/standby connection
+      # threads so overload queues/retries instead of corrupting cache. Keep active
+      # threads at 96 under nofile=1024; production sizing raises replica count
+      # instead of pushing one acng process past its select(2) fd ceiling.
+      maxConThreads: 96
+      maxStandbyConThreads: 32
+      # Keep nofile at or below FD_SETSIZE because apt-cacher-ng uses select(2).
+      # Raising this above 1024 can make fd_set crashes more likely.
+      nofileLimit: 1024
+    gc:
+      enabled: true
+      # apt-cacher-ng has age-based expiry (ExThreshold), but not a hard disk
+      # high-water guard. Keep this below its ephemeral-storage and emptyDir
+      # limits.
+      maxBytes: "1073741824"
+      targetRatio: "0.8"
+    livenessProbe:
+      path: /acng-report.html
+      initialDelaySeconds: 30
+      periodSeconds: 30
+      timeoutSeconds: 10
+      failureThreshold: 10
+      successThreshold: 1
+    readinessProbe:
+      path: /acng-report.html
+      initialDelaySeconds: 10
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 3
+      successThreshold: 1
+  
+  # apk (Alpine) cache. Served by the same apt-cacher-ng container as apt/yum;
+  # this only adds a dedicated Service so clients can use
+  # apk.<ns>.svc.cluster.local as the repository host.
+  apk:
+    serviceName: apk
+  
+  # git cache, served by a pull-through bare-mirror smart HTTP backend.
+  git:
+    serviceName: git
+    # Run git-cache as its own Deployment instead of a container in the shared
+    # package-mirror pod. The git mirror cache can grow quickly between GC
+    # cycles, and its emptyDir sizeLimit eviction (or git OOM) otherwise takes
+    # down the whole pod. Standalone, only git pods are affected. The Service selector
+    # follows this flag. Set false to revert git back into the shared pod.
+    standalone: true
+    # Replicas for the standalone git Deployment.
+    replicaCount: 1
+    # Add affinity in a production override when git cache I/O needs isolation.
+    affinity: {}
+    image:
+      # Built from chart/images/git-cache/Dockerfile and pushed to a registry
+      # reachable by the cluster. A plain nginx/squid Docker Hub image is not
+      # enough because Git smart HTTP packs are generated by git-upload-pack;
+      # this service wraps git-http-backend with local bare mirror management.
+      repository: ghcr.io/inclusionai/buildkit-service/git-cache
+      tag: latest
+      pullPolicy: Always
+    portName: git
+    port: 8080
+    protocol: TCP
+    env:
+      cacheTtlSeconds: 300
+      # Each concurrent git-upload-pack runs its own pack-objects. Keep the
+      # serving fan-out conservative and scale with replicas instead.
+      maxActiveRequests: 4
+      busyTimeoutSeconds: 30
+      maxRequestBodyBytes: 10485760
+      requestReadTimeoutSeconds: 30
+      # Keep false for an internet-facing source cache. Enable only when this
+      # Service is intentionally used to mirror trusted private Git servers.
+      allowPrivateUpstreams: false
+      upstreamScheme: https
+      # Upper bound for a single upstream git command (clone --mirror /
+      # remote update). Large repositories can need substantially more than
+      # 30 minutes for their first mirror clone.
+      gitTimeoutSeconds: 7200
+      # First-time clones run outside the maxActiveRequests gate and their
+      # index-pack memory is not bounded by the pack.* caps; a burst of large
+      # concurrent clones OOM-killed git pods (137) and blew tens of GB of tmp
+      # data past the GC high-water between cycles. Requires the rebuilt image.
+      maxConcurrentClones: 1
+      # Per-fetch pack-objects memory caps, injected as git config into
+      # git-http-backend (works with the current image too). Without these a
+      # single large-repo fetch can use several GB and OOM-kill the container.
+      packThreads: 1
+      packWindowMemory: 256m
+      packDeltaCacheSize: 128m
+      # Size-based mirror GC. Keep maxDiskBytes below the emptyDir limit so
+      # in-flight clones have temporary headroom. 0 disables.
+      maxDiskBytes: "1073741824"
+      gcIntervalSeconds: 120
+      gcTargetRatio: "0.8"
+    resources:
+      limits:
+        cpu: "1"
+        memory: 1Gi
+        ephemeral-storage: 2Gi
+    # Optional per-backend persistence. Prefer this over global persistence when
+    # only git-cache should share a RWX cache across replicas.
+    persistence:
+      enabled: false
+      existingClaim: ""
+      accessModes:
+        - ReadWriteMany
+      size: 1Ti
+      storageClassName: ""
+      annotations: {}
+    livenessProbe:
+      path: /healthz
+      initialDelaySeconds: 10
+      periodSeconds: 30
+      timeoutSeconds: 5
+      failureThreshold: 3
+      successThreshold: 1
+    readinessProbe:
+      path: /healthz
+      initialDelaySeconds: 5
+      periodSeconds: 15
+      timeoutSeconds: 3
+      failureThreshold: 3
+      successThreshold: 1
+  
+  # Docker registry pull-through caches for image pulls (for example BuildKit
+  # Dockerfile FROM). Each mirror is one Docker Distribution proxy instance with
+  # exactly one upstream remoteUrl, so DockerHub and each private registry
+  # host need separate mirror containers and Services.
+  registry:
+    # Increment this non-sensitive revision to roll Registry Pods after changing
+    # credentials in an existing Secret or other secret-backed configuration.
+    configRevision: ""
+    image:
+      repository: registry
+      # MUST be Distribution v3+: proxy.ttl is only honored since v3. Registry
+      # 2.8.x silently ignores it and hardcodes a 168h scheduler TTL, allowing
+      # a pull-through cache to exhaust its volume.
+      # NOTE: v3 reads its config from /etc/distribution/config.yml.
+      tag: "3.0.0"
+      pullPolicy: IfNotPresent
+    protocol: TCP
+    portName: registry
+    port: 5000
+    debugPortName: debug
+    debugPort: 5001
+    deployment:      # Defaults to deployment.replicaCount when empty.
+      replicaCount: 1
+    env:
+      # Expiry of pull-through cache content (Distribution v3 proxy scheduler,
+      # requires storage.delete.enabled). Entries are re-scheduled on every
+      # pull, so frequently used base layers stay cached, while one-shot eval
+      # images expire quickly. Keep ingest-rate * ttl well
+      # below persistence.size.
+      ttl: 1h
+      deleteEnabled: true
+      # High-concurrency filesystem tuning. The registry default is 100.
+      filesystemMaxThreads: 512
+      blobDescriptorSize: 100000
+      logLevel: info
+      proxyUsername: ""
+      proxyPassword: ""
+    resources:
+      limits:
+        cpu: "1"
+        memory: 1Gi
+        # Only covers the container writable layer + logs when persistence is
+        # enabled (the cache lives on the PVC). In the emptyDir fallback mode
+        # this MUST stay above persistence.emptyDir.registrySizeLimit, because
+        # emptyDir usage counts against the pod-level sum of container limits.
+        ephemeral-storage: 3Gi
+    # Per-replica persistent cache (StatefulSet volumeClaimTemplates). RWO
+    # storage works without a shared-filesystem dependency because each replica
+    # owns its own claim. The cache survives
+    # pod restarts and rolling updates (no cold starts), and its capacity is
+    # no longer bounded by node root disks.
+    persistence:
+      enabled: false
+      accessModes:
+        - ReadWriteOnce
+      # With proxy ttl=1h, steady state is roughly ingest-rate * ttl
+      # (~100GiB/h per replica at 4 replicas under burst). 1Ti leaves ample
+      # headroom; on most clouds disk IOPS/throughput also scale with size.
+      size: 1Ti
+      # Set to a storage class available in your cluster (for example gp3 on
+      # EKS, premium-rwo on GKE, alicloud-disk-topology-alltype on ACK). Empty
+      # uses the cluster default. WaitForFirstConsumer binding avoids
+      # zone-mismatch scheduling issues.
+      storageClassName: ""
+      annotations: {}
+    livenessProbe:
+      initialDelaySeconds: 20
+      periodSeconds: 30
+      timeoutSeconds: 5
+      failureThreshold: 5
+      successThreshold: 1
+    readinessProbe:
+      initialDelaySeconds: 5
+      periodSeconds: 10
+      timeoutSeconds: 3
+      failureThreshold: 3
+      successThreshold: 1
+    # Per-mirror cache-usage exporter sidecar. Reports registry_mirror cache
+    # used/total bytes from each mirror's /var/lib/registry volume. Request
+    # counts come from Distribution's own Prometheus metrics on debugPort.
+    cacheMetrics:
+      enabled: true
+      portName: cache-metrics
+      port: 9300
+      dirStatsTtlSeconds: 60
+
+    gc:
+      enabled: false
+      # Do NOT run generic online file GC against Docker Distribution storage.
+      # Distribution keeps in-memory metadata and may concurrently serve files;
+      # deleting blobs underneath it can produce 200 responses with zero bytes,
+      # which BuildKit reports as "failed to read expected number of bytes".
+      # The supported online cleanup path is the proxy TTL scheduler above.
+      maxBytes: "7516192768"
+      targetRatio: "0.8"
+
+  # Generic cache high-water janitor used for cache backends that do not provide
+  # reliable size-based GC themselves (currently npm/apt-yum). It only
+  # removes old regular files and empty directories; pip and git keep their own
+  # backend-specific size controls.
+  cacheGc:
+    enabled: true
+    image:
+      repository: python
+      tag: "3.12-slim"
+      pullPolicy: IfNotPresent
+    intervalSeconds: 120
+    minAgeSeconds: 300
+    excludeRegex: '(^|/)(htpasswd|apt-cacher\.log)$|(^|/)uploads($|/)'
+    resources:
+      limits:
+        cpu: "100m"
+        memory: 128Mi
+        ephemeral-storage: 1Gi
+  
+  # Unified metrics exporter. Runs as a sidecar that aggregates cache statistics
+  # from all three backends (pip / npm / apt-yum) and exposes them in Prometheus
+  # text format on a single `metrics` Service:
+  #   metrics.<ns>.svc.cluster.local/metrics
+  metrics:
+    enabled: true
+    serviceName: metrics
+    image:
+      repository: python
+      tag: "3.12-slim"
+      pullPolicy: IfNotPresent
+    portName: metrics
+    port: 9090
+    protocol: TCP
+    dirStatsTtlSeconds: 60
+    # The exporter is lightweight (stdlib-only); keep it small.
+    resources:
+      limits:
+        cpu: "250m"
+        memory: 256Mi
+        ephemeral-storage: 1Gi
+  
+  # Cache volumes for pip/npm/apt-yum and optionally git. These use separate
+  # emptyDirs by default so kubelet can enforce per-backend sizeLimit. Registry
+  # persistence is configured independently above and can use per-replica
+  # StatefulSet claims.
+  persistence:
+    enabled: false
+    existingClaim: ""
+    accessModes:
+      - ReadWriteOnce
+    size: 300Gi
+    storageClassName: ""
+    annotations: {}
+    emptyDir:
+      sizeLimit: ""
+      pipSizeLimit: 2Gi
+      npmSizeLimit: 2Gi
+      aptYumSizeLimit: 2Gi
+      # Keep aligned with git.resources.limits.ephemeral-storage and leave burst
+      # headroom for temporary clone data between GC cycles.
+      gitSizeLimit: 2Gi
+      # Fallback only: used when registry.persistence is disabled and the
+      # mirror cache sits on a node-local emptyDir.
+      registrySizeLimit: 2Gi
+  
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    hosts:
+      - host: package-mirror.local
+        paths:
+          - path: /
+            pathType: Prefix
+            # Which backend Service to route to: pip | npm | apt-yum
+            service: pip
+    tls: []
+  
+  # Add a nodeSelector in a production override when using a dedicated pool.
+  nodeSelector: {}
+  
+  podAnnotations: {}
+  podLabels: {}
+  podSecurityContext: {}
+  securityContext: {}

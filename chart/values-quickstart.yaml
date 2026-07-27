@@ -1,0 +1,127 @@
+# Small, portable settings for evaluating buildkit-service on a development
+# Kubernetes cluster. Production deployments should size workers and caches for
+# their workload; see docs/buildctl-batch.md and docs/package-mirror.md.
+
+buildkitdConfig:
+  worker:
+    oci:
+      gcKeepStorageMB: 10240
+      gcPolicies:
+        - keepBytes: 2147483648
+          keepDuration: 86400
+          filters:
+            - type==source.local
+            - type==exec.cachemount
+            - type==source.git.checkout
+        - all: true
+          keepBytes: 10737418240
+
+buildctlDaemon:
+  maxRequestBytes: 67108864
+  maxExtractedBytes: 536870912
+  maxArchiveFiles: 10000
+  maxRetainedTasks: 20
+  maxWorkDirBytes: 2147483648
+  uploadReadTimeout: 2m
+  pprof:
+    enabled: false
+  publicService:
+    enabled: false
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+      ephemeral-storage: 1Gi
+    limits:
+      cpu: "2"
+      memory: 4Gi
+      ephemeral-storage: 10Gi
+  tolerations: []
+  affinity: null
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 1Gi
+    ephemeral-storage: 10Gi
+  limits:
+    cpu: "4"
+    memory: 8Gi
+    ephemeral-storage: 20Gi
+
+tolerations: []
+affinity: null
+
+volumes:
+  - name: run-buildkit
+    emptyDir: {}
+  - name: lib-buildkit
+    emptyDir:
+      sizeLimit: 15Gi
+
+deployment:
+  replicas: 1
+
+packageMirror:
+  nodeSelector: null
+  deployment:
+    replicaCount: 1
+  podDisruptionBudget:
+    enabled: false
+  topologySpread:
+    enabled: false
+  tolerations: []
+  affinity: null
+  pip:
+    env:
+      cacheSize: "1073741824"
+    resources:
+      limits:
+        cpu: "1"
+        memory: 1Gi
+        ephemeral-storage: 2Gi
+  npm:
+    env:
+      nodeOptions: --max-old-space-size=512
+    gc:
+      maxBytes: "1073741824"
+    resources:
+      limits:
+        cpu: "1"
+        memory: 1Gi
+        ephemeral-storage: 2Gi
+  aptYum:
+    gc:
+      maxBytes: "1073741824"
+    resources:
+      limits:
+        cpu: "1"
+        memory: 1Gi
+        ephemeral-storage: 2Gi
+  git:
+    replicaCount: 1
+    affinity: null
+    env:
+      maxDiskBytes: "1073741824"
+    resources:
+      limits:
+        cpu: "1"
+        memory: 1Gi
+        ephemeral-storage: 2Gi
+  registry:
+    deployment:
+      replicaCount: 1
+    resources:
+      limits:
+        cpu: "1"
+        memory: 1Gi
+        ephemeral-storage: 3Gi
+    persistence:
+      enabled: false
+  persistence:
+    emptyDir:
+      pipSizeLimit: 2Gi
+      npmSizeLimit: 2Gi
+      aptYumSizeLimit: 2Gi
+      gitSizeLimit: 2Gi
+      registrySizeLimit: 2Gi

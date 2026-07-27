@@ -1,0 +1,15 @@
+.git
+.github
+infra
+bin
+source
+source.zip
+result.jsonl
+.buildctl-batch.state
+**/.terraform
+**/*.tfstate
+**/*.tfstate.*
+kubeconfig
+kubeconfig.*
+**/__pycache__
+**/*.pyc

@@ -1,0 +1,85 @@
+{{- if and .Values.buildkit.enabled .Values.buildkitdConfig.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "buildkit-service.fullname" . }}-buildkitd
+  namespace: {{ include "buildkit-service.namespace" . }}
+  labels:
+    {{- include "buildkit-service.labels" . | nindent 4 }}
+data:
+  buildkitd.toml: |
+    {{- $mirrorNamespace := include "buildkit-service.packageMirror.namespace" . }}
+    {{- $selectedMirrors := include "buildkit-service.packageMirror.selectedRegistryMirrors" . | fromYamlArray }}
+    {{- range $index, $entry := $selectedMirrors }}
+    {{- if not $entry.host }}
+    {{- fail (printf "selected registry mirror[%d].host is required" $index) }}
+    {{- end }}
+    {{- if not $entry.serviceName }}
+    {{- fail (printf "selected registry mirror[%d].serviceName is required" $index) }}
+    {{- end }}
+    [registry.{{ $entry.host | quote }}]
+      mirrors = {{ list (printf "%s.%s.svc.cluster.local" $entry.serviceName $mirrorNamespace) | toJson }}
+    {{- end }}
+    {{- range $index, $entry := .Values.buildkitdConfig.registryMirrors }}
+    {{- if not $entry.host }}
+    {{- fail (printf "Values.buildkitdConfig.registryMirrors[%d].host is required" $index) }}
+    {{- end }}
+    {{- if not $entry.mirrors }}
+    {{- fail (printf "Values.buildkitdConfig.registryMirrors[%d].mirrors must not be empty" $index) }}
+    {{- end }}
+    [registry.{{ $entry.host | quote }}]
+      mirrors = {{ toJson $entry.mirrors }}
+    {{- end }}
+    {{- range $index, $entry := $selectedMirrors }}
+    {{- if not $entry.serviceName }}
+    {{- fail (printf "selected registry mirror[%d].serviceName is required" $index) }}
+    {{- end }}
+    [registry.{{ printf "%s.%s.svc.cluster.local" $entry.serviceName $mirrorNamespace | quote }}]
+      http = true
+    {{- end }}
+    {{- range $index, $entry := .Values.buildkitdConfig.registryConfigs }}
+    {{- if not $entry.host }}
+    {{- fail (printf "Values.buildkitdConfig.registryConfigs[%d].host is required" $index) }}
+    {{- end }}
+    [registry.{{ $entry.host | quote }}]
+      {{- if hasKey $entry "http" }}
+      http = {{ $entry.http }}
+      {{- end }}
+      {{- if hasKey $entry "insecure" }}
+      insecure = {{ $entry.insecure }}
+      {{- end }}
+      {{- with $entry.ca }}
+      ca = {{ toJson . }}
+      {{- end }}
+    {{- end }}
+    {{- with .Values.buildkitdConfig.system }}
+    [system]
+      {{- with .maxRegistryConcurrency }}
+      maxRegistryConcurrency = {{ int . }}
+      {{- end }}
+    {{- end }}
+    {{- with .Values.buildkitdConfig.worker.oci }}
+    [worker.oci]
+      {{- if hasKey . "gc" }}
+      gc = {{ .gc }}
+      {{- end }}
+      {{- with .gcKeepStorageMB }}
+      gckeepstorage = {{ int . }}
+      {{- end }}
+    {{- range .gcPolicies }}
+    [[worker.oci.gcpolicy]]
+      {{- if hasKey . "all" }}
+      all = {{ .all }}
+      {{- end }}
+      {{- with .keepBytes }}
+      keepBytes = {{ int64 . }}
+      {{- end }}
+      {{- with .keepDuration }}
+      keepDuration = {{ int64 . }}
+      {{- end }}
+      {{- with .filters }}
+      filters = {{ toJson . }}
+      {{- end }}
+    {{- end }}
+    {{- end }}
+{{- end }}

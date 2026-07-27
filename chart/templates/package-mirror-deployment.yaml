@@ -1,0 +1,423 @@
+{{- if .Values.packageMirror.enabled }}
+{{- $cacheSize := toString .Values.packageMirror.pip.env.cacheSize -}}
+{{- $topologySpread := .Values.packageMirror.topologySpread | default dict -}}
+{{- if not (regexMatch "^[0-9]+$" $cacheSize) -}}
+{{- fail "Values.pip.env.cacheSize must be an integer number of bytes, for example 53687091200" -}}
+{{- end }}
+{{- $gcTargets := list -}}
+{{- if .Values.packageMirror.npm.gc.enabled -}}
+{{- $gcTargets = append $gcTargets (printf "npm=/gc/npm:%s:%s" (toString .Values.packageMirror.npm.gc.maxBytes) (toString .Values.packageMirror.npm.gc.targetRatio)) -}}
+{{- end -}}
+{{- if .Values.packageMirror.aptYum.gc.enabled -}}
+{{- $gcTargets = append $gcTargets (printf "apt-yum=/gc/apt-yum:%s:%s" (toString .Values.packageMirror.aptYum.gc.maxBytes) (toString .Values.packageMirror.aptYum.gc.targetRatio)) -}}
+{{- end -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "buildkit-service.packageMirror.fullname" . }}
+  namespace: {{ include "buildkit-service.packageMirror.namespace" . }}
+  labels:
+    {{- include "buildkit-service.packageMirror.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.packageMirror.deployment.replicaCount }}
+  strategy:
+    {{- toYaml .Values.packageMirror.deployment.strategy | nindent 4 }}
+  selector:
+    matchLabels:
+      {{- include "buildkit-service.packageMirror.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "buildkit-service.packageMirror.selectorLabels" . | nindent 8 }}
+        {{- with .Values.packageMirror.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/package-mirror-configmap.yaml") . | sha256sum }}
+        {{- with .Values.packageMirror.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.packageMirror.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.packageMirror.podSecurityContext | nindent 8 }}
+      containers:
+        # ----------------------------------------------------------------- pip
+        - name: pip
+          image: {{ printf "%s:%s" .Values.packageMirror.pip.image.repository .Values.packageMirror.pip.image.tag }}
+          imagePullPolicy: {{ .Values.packageMirror.pip.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.packageMirror.securityContext | nindent 12 }}
+          command:
+            - /usr/local/bin/gunicorn
+          args:
+            - --preload
+            - --access-logfile
+            - '-'
+            - --access-logformat
+            - '%(h)s "%(r)s" %(s)s %(b)s %(M)dms'
+            - --logger-class
+            - proxpi.server._GunicornLogger
+            - proxpi.server:app
+            - --bind
+            - {{ printf "0.0.0.0:%d" (int .Values.packageMirror.pip.port) | quote }}
+            - --threads
+            - {{ .Values.packageMirror.pip.gunicorn.threads | quote }}
+            - --timeout
+            - {{ .Values.packageMirror.pip.gunicorn.timeoutSeconds | quote }}
+            - --graceful-timeout
+            - {{ .Values.packageMirror.pip.gunicorn.gracefulTimeoutSeconds | quote }}
+            - --no-control-socket
+          env:
+            - name: PROXPI_INDEX_URL
+              value: {{ .Values.packageMirror.pip.env.indexUrl | quote }}
+            - name: PROXPI_INDEX_TTL
+              value: {{ .Values.packageMirror.pip.env.indexTtlSeconds | quote }}
+            - name: PROXPI_CACHE_SIZE
+              value: {{ $cacheSize | quote }}
+            - name: PROXPI_CACHE_DIR
+              value: /var/cache/proxpi
+            - name: PROXPI_DOWNLOAD_TIMEOUT
+              value: {{ .Values.packageMirror.pip.env.downloadTimeoutSeconds | quote }}
+            - name: PROXPI_CONNECT_TIMEOUT
+              value: {{ .Values.packageMirror.pip.env.connectTimeoutSeconds | quote }}
+            - name: PROXPI_READ_TIMEOUT
+              value: {{ .Values.packageMirror.pip.env.readTimeoutSeconds | quote }}
+            - name: PROXPI_LOGGING_LEVEL
+              value: {{ .Values.packageMirror.pip.env.loggingLevel | quote }}
+            {{- $extraIndexUrls := include "buildkit-service.packageMirror.pip.extraIndexUrls" . }}
+            {{- if $extraIndexUrls }}
+            - name: PROXPI_EXTRA_INDEX_URLS
+              value: {{ $extraIndexUrls | quote }}
+            {{- end }}
+            {{- $extraIndexTtls := include "buildkit-service.packageMirror.pip.extraIndexTtls" . }}
+            {{- if $extraIndexTtls }}
+            - name: PROXPI_EXTRA_INDEX_TTLS
+              value: {{ $extraIndexTtls | quote }}
+            {{- end }}
+            {{- if .Values.packageMirror.pip.env.disableIndexSslVerification }}
+            - name: PROXPI_DISABLE_INDEX_SSL_VERIFICATION
+              value: "1"
+            {{- end }}
+          ports:
+            - name: {{ .Values.packageMirror.pip.portName }}
+              containerPort: {{ .Values.packageMirror.pip.port }}
+              protocol: {{ .Values.packageMirror.pip.protocol }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.packageMirror.pip.livenessProbe.path }}
+              port: {{ .Values.packageMirror.pip.portName }}
+            initialDelaySeconds: {{ .Values.packageMirror.pip.livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.packageMirror.pip.livenessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.packageMirror.pip.livenessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.packageMirror.pip.livenessProbe.failureThreshold }}
+            successThreshold: {{ .Values.packageMirror.pip.livenessProbe.successThreshold }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.packageMirror.pip.readinessProbe.path }}
+              port: {{ .Values.packageMirror.pip.portName }}
+            initialDelaySeconds: {{ .Values.packageMirror.pip.readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.packageMirror.pip.readinessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.packageMirror.pip.readinessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.packageMirror.pip.readinessProbe.failureThreshold }}
+            successThreshold: {{ .Values.packageMirror.pip.readinessProbe.successThreshold }}
+          resources:
+            {{- toYaml (default .Values.packageMirror.resources .Values.packageMirror.pip.resources) | nindent 12 }}
+          volumeMounts:
+            {{- if .Values.packageMirror.persistence.enabled }}
+            - name: {{ include "buildkit-service.packageMirror.cacheVolumeName" . }}
+              mountPath: /var/cache/proxpi
+              subPath: proxpi
+            {{- else }}
+            - name: {{ include "buildkit-service.packageMirror.pipCacheVolumeName" . }}
+              mountPath: /var/cache/proxpi
+            {{- end }}
+        # ----------------------------------------------------------------- npm
+        - name: npm
+          image: {{ printf "%s:%s" .Values.packageMirror.npm.image.repository .Values.packageMirror.npm.image.tag }}
+          imagePullPolicy: {{ .Values.packageMirror.npm.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.packageMirror.securityContext | nindent 12 }}
+          env:
+            {{- with .Values.packageMirror.npm.env.nodeOptions }}
+            - name: NODE_OPTIONS
+              value: {{ . | quote }}
+            {{- end }}
+          ports:
+            - name: {{ .Values.packageMirror.npm.portName }}
+              containerPort: {{ .Values.packageMirror.npm.port }}
+              protocol: {{ .Values.packageMirror.npm.protocol }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.packageMirror.npm.livenessProbe.path }}
+              port: {{ .Values.packageMirror.npm.portName }}
+            initialDelaySeconds: {{ .Values.packageMirror.npm.livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.packageMirror.npm.livenessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.packageMirror.npm.livenessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.packageMirror.npm.livenessProbe.failureThreshold }}
+            successThreshold: {{ .Values.packageMirror.npm.livenessProbe.successThreshold }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.packageMirror.npm.readinessProbe.path }}
+              port: {{ .Values.packageMirror.npm.portName }}
+            initialDelaySeconds: {{ .Values.packageMirror.npm.readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.packageMirror.npm.readinessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.packageMirror.npm.readinessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.packageMirror.npm.readinessProbe.failureThreshold }}
+            successThreshold: {{ .Values.packageMirror.npm.readinessProbe.successThreshold }}
+          resources:
+            {{- toYaml (default .Values.packageMirror.resources .Values.packageMirror.npm.resources) | nindent 12 }}
+          volumeMounts:
+            {{- if .Values.packageMirror.persistence.enabled }}
+            - name: {{ include "buildkit-service.packageMirror.cacheVolumeName" . }}
+              mountPath: /verdaccio/storage
+              subPath: verdaccio
+            {{- else }}
+            - name: {{ include "buildkit-service.packageMirror.npmCacheVolumeName" . }}
+              mountPath: /verdaccio/storage
+            {{- end }}
+            - name: {{ include "buildkit-service.packageMirror.configVolumeName" . }}
+              mountPath: /verdaccio/conf/config.yaml
+              subPath: verdaccio-config.yaml
+        # ------------------------------------------------------------- apt+yum
+        - name: apt-yum
+          image: {{ printf "%s:%s" .Values.packageMirror.aptYum.image.repository .Values.packageMirror.aptYum.image.tag }}
+          imagePullPolicy: {{ .Values.packageMirror.aptYum.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.packageMirror.securityContext | nindent 12 }}
+          env:
+            - name: ACNG_NOFILE_LIMIT
+              value: {{ .Values.packageMirror.aptYum.env.nofileLimit | quote }}
+          ports:
+            - name: {{ .Values.packageMirror.aptYum.portName }}
+              containerPort: {{ .Values.packageMirror.aptYum.port }}
+              protocol: {{ .Values.packageMirror.aptYum.protocol }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.packageMirror.aptYum.livenessProbe.path }}
+              port: {{ .Values.packageMirror.aptYum.portName }}
+            initialDelaySeconds: {{ .Values.packageMirror.aptYum.livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.packageMirror.aptYum.livenessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.packageMirror.aptYum.livenessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.packageMirror.aptYum.livenessProbe.failureThreshold }}
+            successThreshold: {{ .Values.packageMirror.aptYum.livenessProbe.successThreshold }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.packageMirror.aptYum.readinessProbe.path }}
+              port: {{ .Values.packageMirror.aptYum.portName }}
+            initialDelaySeconds: {{ .Values.packageMirror.aptYum.readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.packageMirror.aptYum.readinessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.packageMirror.aptYum.readinessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.packageMirror.aptYum.readinessProbe.failureThreshold }}
+            successThreshold: {{ .Values.packageMirror.aptYum.readinessProbe.successThreshold }}
+          resources:
+            {{- toYaml (default .Values.packageMirror.resources .Values.packageMirror.aptYum.resources) | nindent 12 }}
+          volumeMounts:
+            {{- if .Values.packageMirror.persistence.enabled }}
+            - name: {{ include "buildkit-service.packageMirror.cacheVolumeName" . }}
+              mountPath: /var/cache/apt-cacher-ng
+              subPath: apt-cacher-ng
+            {{- else }}
+            - name: {{ include "buildkit-service.packageMirror.aptYumCacheVolumeName" . }}
+              mountPath: /var/cache/apt-cacher-ng
+            {{- end }}
+            - name: {{ include "buildkit-service.packageMirror.configVolumeName" . }}
+              mountPath: /etc/apt-cacher-ng/zz-package-mirror.conf
+              subPath: acng-package-mirror.conf
+            - name: {{ include "buildkit-service.packageMirror.configVolumeName" . }}
+              mountPath: /etc/apt-cacher-ng/backends_debian
+              subPath: backends_debian
+            - name: {{ include "buildkit-service.packageMirror.configVolumeName" . }}
+              mountPath: /etc/apt-cacher-ng/backends_ubuntu
+              subPath: backends_ubuntu
+        # ----------------------------------------------------------------- git
+        {{- if not .Values.packageMirror.git.standalone }}
+        {{- include "buildkit-service.packageMirror.gitContainer" . | nindent 8 }}
+        {{- end }}
+        {{- if .Values.packageMirror.metrics.enabled }}
+        # ------------------------------------------------------------- metrics
+        - name: metrics
+          image: {{ printf "%s:%s" .Values.packageMirror.metrics.image.repository .Values.packageMirror.metrics.image.tag }}
+          imagePullPolicy: {{ .Values.packageMirror.metrics.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.packageMirror.securityContext | nindent 12 }}
+          command:
+            - python3
+            - /etc/package-mirror/metrics-exporter.py
+          env:
+            - name: METRICS_PORT
+              value: {{ .Values.packageMirror.metrics.port | quote }}
+            - name: CACHE_DIR
+              value: /cache
+            - name: PIP_PORT
+              value: {{ .Values.packageMirror.pip.port | quote }}
+            - name: NPM_PORT
+              value: {{ .Values.packageMirror.npm.port | quote }}
+            - name: APT_PORT
+              value: {{ .Values.packageMirror.aptYum.port | quote }}
+            - name: GIT_PORT
+              value: {{ .Values.packageMirror.git.port | quote }}
+            - name: DIR_STATS_TTL_SECONDS
+              value: {{ .Values.packageMirror.metrics.dirStatsTtlSeconds | quote }}
+          ports:
+            - name: {{ .Values.packageMirror.metrics.portName }}
+              containerPort: {{ .Values.packageMirror.metrics.port }}
+              protocol: {{ .Values.packageMirror.metrics.protocol }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.packageMirror.metrics.portName }}
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 3
+            failureThreshold: 3
+            successThreshold: 1
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.packageMirror.metrics.portName }}
+            initialDelaySeconds: 5
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+            successThreshold: 1
+          resources:
+            {{- toYaml .Values.packageMirror.metrics.resources | nindent 12 }}
+          volumeMounts:
+            {{- if .Values.packageMirror.persistence.enabled }}
+            - name: {{ include "buildkit-service.packageMirror.cacheVolumeName" . }}
+              mountPath: /cache
+              readOnly: true
+            {{- if .Values.packageMirror.git.persistence.enabled }}
+            - name: {{ include "buildkit-service.packageMirror.gitCacheVolumeName" . }}
+              mountPath: /cache/git-mirror
+              readOnly: true
+            {{- end }}
+            {{- else }}
+            - name: {{ include "buildkit-service.packageMirror.pipCacheVolumeName" . }}
+              mountPath: /cache/proxpi
+              readOnly: true
+            - name: {{ include "buildkit-service.packageMirror.aptYumCacheVolumeName" . }}
+              mountPath: /cache/apt-cacher-ng
+              readOnly: true
+            {{- if not .Values.packageMirror.git.standalone }}
+            - name: {{ include "buildkit-service.packageMirror.gitCacheVolumeName" . }}
+              mountPath: /cache/git-mirror
+              readOnly: true
+            {{- end }}
+            {{- end }}
+            - name: {{ include "buildkit-service.packageMirror.configVolumeName" . }}
+              mountPath: /etc/package-mirror/metrics-exporter.py
+              subPath: metrics-exporter.py
+        {{- end }}
+        {{- if and .Values.packageMirror.cacheGc.enabled (gt (len $gcTargets) 0) }}
+        # High-water cache janitor for backends without reliable size-based GC.
+        - name: cache-gc
+          image: {{ printf "%s:%s" .Values.packageMirror.cacheGc.image.repository .Values.packageMirror.cacheGc.image.tag }}
+          imagePullPolicy: {{ .Values.packageMirror.cacheGc.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.packageMirror.securityContext | nindent 12 }}
+          command:
+            - python3
+            - /etc/package-mirror/cache-gc.py
+          env:
+            - name: CACHE_GC_TARGETS
+              value: {{ join ";" $gcTargets | quote }}
+            - name: CACHE_GC_INTERVAL_SECONDS
+              value: {{ .Values.packageMirror.cacheGc.intervalSeconds | quote }}
+            - name: CACHE_GC_MIN_AGE_SECONDS
+              value: {{ .Values.packageMirror.cacheGc.minAgeSeconds | quote }}
+            - name: CACHE_GC_EXCLUDE_REGEX
+              value: {{ .Values.packageMirror.cacheGc.excludeRegex | quote }}
+          resources:
+            {{- toYaml .Values.packageMirror.cacheGc.resources | nindent 12 }}
+          volumeMounts:
+            {{- if .Values.packageMirror.persistence.enabled }}
+            {{- if .Values.packageMirror.npm.gc.enabled }}
+            - name: {{ include "buildkit-service.packageMirror.cacheVolumeName" . }}
+              mountPath: /gc/npm
+              subPath: verdaccio
+            {{- end }}
+            {{- if .Values.packageMirror.aptYum.gc.enabled }}
+            - name: {{ include "buildkit-service.packageMirror.cacheVolumeName" . }}
+              mountPath: /gc/apt-yum
+              subPath: apt-cacher-ng
+            {{- end }}
+            {{- else }}
+            {{- if .Values.packageMirror.npm.gc.enabled }}
+            - name: {{ include "buildkit-service.packageMirror.npmCacheVolumeName" . }}
+              mountPath: /gc/npm
+            {{- end }}
+            {{- if .Values.packageMirror.aptYum.gc.enabled }}
+            - name: {{ include "buildkit-service.packageMirror.aptYumCacheVolumeName" . }}
+              mountPath: /gc/apt-yum
+            {{- end }}
+            {{- end }}
+            - name: {{ include "buildkit-service.packageMirror.configVolumeName" . }}
+              mountPath: /etc/package-mirror/cache-gc.py
+              subPath: cache-gc.py
+        {{- end }}
+      {{- with .Values.packageMirror.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.packageMirror.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if (get $topologySpread "enabled") }}
+      topologySpreadConstraints:
+        - maxSkew: {{ get $topologySpread "maxSkew" | default 1 }}
+          topologyKey: {{ get $topologySpread "topologyKey" | default "kubernetes.io/hostname" | quote }}
+          whenUnsatisfiable: {{ get $topologySpread "whenUnsatisfiable" | default "ScheduleAnyway" }}
+          labelSelector:
+            matchLabels:
+              {{- include "buildkit-service.packageMirror.selectorLabels" . | nindent 14 }}
+      {{- end }}
+      {{- with .Values.packageMirror.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      volumes:
+        - name: {{ include "buildkit-service.packageMirror.configVolumeName" . }}
+          configMap:
+            name: {{ include "buildkit-service.packageMirror.fullname" . }}
+        {{- if .Values.packageMirror.persistence.enabled }}
+        - name: {{ include "buildkit-service.packageMirror.cacheVolumeName" . }}
+          persistentVolumeClaim:
+            claimName: {{ default (include "buildkit-service.packageMirror.fullname" .) .Values.packageMirror.persistence.existingClaim }}
+        {{- else }}
+        - name: {{ include "buildkit-service.packageMirror.pipCacheVolumeName" . }}
+          emptyDir:
+            {{- with .Values.packageMirror.persistence.emptyDir.pipSizeLimit }}
+            sizeLimit: {{ . }}
+            {{- end }}
+        - name: {{ include "buildkit-service.packageMirror.npmCacheVolumeName" . }}
+          emptyDir:
+            {{- with .Values.packageMirror.persistence.emptyDir.npmSizeLimit }}
+            sizeLimit: {{ . }}
+            {{- end }}
+        - name: {{ include "buildkit-service.packageMirror.aptYumCacheVolumeName" . }}
+          emptyDir:
+            {{- with .Values.packageMirror.persistence.emptyDir.aptYumSizeLimit }}
+            sizeLimit: {{ . }}
+            {{- end }}
+        {{- end }}
+        {{- if not .Values.packageMirror.git.standalone }}
+        {{- if .Values.packageMirror.git.persistence.enabled }}
+        - name: {{ include "buildkit-service.packageMirror.gitCacheVolumeName" . }}
+          persistentVolumeClaim:
+            claimName: {{ default (printf "%s-git" (include "buildkit-service.packageMirror.fullname" .)) .Values.packageMirror.git.persistence.existingClaim }}
+        {{- else if not .Values.packageMirror.persistence.enabled }}
+        - name: {{ include "buildkit-service.packageMirror.gitCacheVolumeName" . }}
+          emptyDir:
+            {{- with .Values.packageMirror.persistence.emptyDir.gitSizeLimit }}
+            sizeLimit: {{ . }}
+            {{- end }}
+        {{- end }}
+        {{- end }}
+
+{{- end }}

@@ -1,0 +1,187 @@
+{{- if and .Values.buildkit.enabled .Values.buildctlDaemonCanary.enabled }}
+{{- $cfg := .Values.buildctlDaemonCanary -}}
+{{- $name := include "buildkit-service.buildctlDaemonCanaryName" . -}}
+{{- $buildkitdAddr := required "Values.buildctlDaemonCanary.buildkitdAddr is required" $cfg.buildkitdAddr -}}
+{{- $image := required "Values.buildctlDaemonCanary.image is required when the canary is enabled" $cfg.image -}}
+{{- $imagePullSecretName := include "buildkit-service.imagePullSecretName" . -}}
+{{- $registryAuthSecretName := $cfg.registryAuthSecretName | default $imagePullSecretName -}}
+{{- $tokenSecretName := $cfg.tokenSecretName | default (include "buildkit-service.buildctlDaemonSecretName" .) -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ include "buildkit-service.namespace" . }}
+  labels:
+    {{- include "buildkit-service.labels" . | nindent 4 }}
+    app.kubernetes.io/component: buildctl-daemon-canary
+spec:
+  replicas: {{ $cfg.replicas }}
+  selector:
+    matchLabels:
+      {{- include "buildkit-service.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: buildctl-daemon-canary
+  template:
+    metadata:
+      labels:
+        {{- include "buildkit-service.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: buildctl-daemon-canary
+        {{- with $cfg.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with $cfg.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with $cfg.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ $cfg.container.name }}
+          command:
+            {{- range $cfg.container.command }}
+            - {{ . | quote }}
+            {{- end }}
+          args:
+            - --listen
+            - {{ $cfg.listen | quote }}
+            - --buildkitd-addr
+            - {{ $buildkitdAddr | quote }}
+            {{- if $cfg.buildkitTLS.enabled }}
+            - --tlsdir
+            - /var/run/secrets/buildkit-tls
+            {{- with $cfg.buildkitTLS.serverName }}
+            - --tlsservername
+            - {{ . | quote }}
+            {{- end }}
+            {{- end }}
+            - --auth-token-file
+            - /var/run/secrets/buildctl-daemon/token
+            - --work-dir
+            - {{ $cfg.workDir | quote }}
+            - --default-mode
+            - {{ $cfg.defaultMode | default "default_mode" | quote }}
+            {{- with $cfg.modes }}
+            - --modes-json
+            - {{ toJson . | quote }}
+            {{- end }}
+            {{- with $cfg.routingTargets }}
+            - --routing-targets-json
+            - {{ toJson . | quote }}
+            {{- end }}
+            - --keep-ttl
+            - {{ $cfg.keepTTL | quote }}
+            - --max-log-bytes
+            - {{ $cfg.maxLogBytes | int | quote }}
+            - --max-request-bytes
+            - {{ $cfg.maxRequestBytes | int64 | quote }}
+            - --max-extracted-bytes
+            - {{ $cfg.maxExtractedBytes | int64 | quote }}
+            - --max-archive-files
+            - {{ $cfg.maxArchiveFiles | int | quote }}
+            - --max-retained-tasks
+            - {{ $cfg.maxRetainedTasks | int | quote }}
+            - --max-work-dir-bytes
+            - {{ $cfg.maxWorkDirBytes | int64 | quote }}
+            - --upload-read-timeout
+            - {{ $cfg.uploadReadTimeout | quote }}
+            - --addr-concurrency
+            - {{ $cfg.addrConcurrency | int | quote }}
+            - --max-concurrency
+            - {{ $cfg.maxConcurrency | int | quote }}
+            - --registry-check-timeout
+            - {{ $cfg.registryCheckTimeout | quote }}
+            - --registry-check-host-rules
+            - {{ include "buildkit-service.registryHostRules" (dict "root" . "daemon" $cfg) | quote }}
+            - --registry-check-concurrency
+            - {{ $cfg.registryCheckConcurrency | int | quote }}
+            - --rlimit-nofile
+            - {{ $cfg.rlimitNoFile | int | quote }}
+          image: {{ $image }}
+          imagePullPolicy: {{ $cfg.imagePullPolicy }}
+          livenessProbe:
+            failureThreshold: {{ $cfg.container.livenessProbe.failureThreshold }}
+            httpGet:
+              path: /healthz
+              port: {{ $cfg.container.portName }}
+            initialDelaySeconds: {{ $cfg.container.livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ $cfg.container.livenessProbe.periodSeconds }}
+            successThreshold: {{ $cfg.container.livenessProbe.successThreshold }}
+            timeoutSeconds: {{ $cfg.container.livenessProbe.timeoutSeconds }}
+          ports:
+            - containerPort: {{ $cfg.container.port }}
+              name: {{ $cfg.container.portName }}
+              protocol: {{ $cfg.container.protocol }}
+          readinessProbe:
+            failureThreshold: {{ $cfg.container.readinessProbe.failureThreshold }}
+            httpGet:
+              path: /healthz
+              port: {{ $cfg.container.portName }}
+            initialDelaySeconds: {{ $cfg.container.readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ $cfg.container.readinessProbe.periodSeconds }}
+            successThreshold: {{ $cfg.container.readinessProbe.successThreshold }}
+            timeoutSeconds: {{ $cfg.container.readinessProbe.timeoutSeconds }}
+          resources:
+            {{- toYaml $cfg.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml $cfg.container.securityContext | nindent 12 }}
+          terminationMessagePath: {{ .Values.terminationMessagePath }}
+          terminationMessagePolicy: {{ .Values.terminationMessagePolicy }}
+          volumeMounts:
+            - name: daemon-token
+              mountPath: /var/run/secrets/buildctl-daemon
+              readOnly: true
+            {{- if $cfg.buildkitTLS.enabled }}
+            - name: buildkit-tls
+              mountPath: /var/run/secrets/buildkit-tls
+              readOnly: true
+            {{- end }}
+          {{- if $registryAuthSecretName }}
+            - name: docker-config
+              mountPath: /root/.docker
+              readOnly: true
+          {{- end }}
+      dnsPolicy: {{ .Values.dnsPolicy }}
+      {{- $imagePullSecrets := include "buildkit-service.renderImagePullSecrets" . }}
+      {{- if $imagePullSecrets }}
+      imagePullSecrets:
+        {{- $imagePullSecrets | nindent 8 }}
+      {{- end }}
+      restartPolicy: {{ .Values.restartPolicy }}
+      schedulerName: {{ .Values.schedulerName }}
+      securityContext:
+        {{- toYaml $cfg.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with $cfg.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      volumes:
+        - name: daemon-token
+          secret:
+            secretName: {{ $tokenSecretName }}
+            items:
+              - key: token
+                path: token
+        {{- if $cfg.buildkitTLS.enabled }}
+        - name: buildkit-tls
+          secret:
+            secretName: {{ required "Values.buildctlDaemonCanary.buildkitTLS.secretName is required when TLS is enabled" $cfg.buildkitTLS.secretName }}
+            items:
+              - key: ca.pem
+                path: ca.pem
+              - key: cert.pem
+                path: cert.pem
+              - key: key.pem
+                path: key.pem
+        {{- end }}
+      {{- if $registryAuthSecretName }}
+        - name: docker-config
+          secret:
+            secretName: {{ $registryAuthSecretName }}
+            items:
+              - key: .dockerconfigjson
+                path: config.json
+      {{- end }}
+{{- end }}

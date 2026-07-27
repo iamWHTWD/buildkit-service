@@ -1,0 +1,77 @@
+{{- if and .Values.buildkit.enabled .Values.metricsAggregator.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "buildkit-service.fullname" . }}-metrics-aggregator
+  namespace: {{ include "buildkit-service.namespace" . }}
+  labels:
+    {{- include "buildkit-service.labels" . | nindent 4 }}
+    app.kubernetes.io/component: metrics-aggregator
+spec:
+  replicas: {{ .Values.metricsAggregator.replicas }}
+  selector:
+    matchLabels:
+      {{- include "buildkit-service.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: metrics-aggregator
+  template:
+    metadata:
+      labels:
+        {{- include "buildkit-service.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: metrics-aggregator
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/metrics-aggregator-configmap.yaml") . | sha256sum }}
+    spec:
+      {{- $imagePullSecrets := include "buildkit-service.renderImagePullSecrets" . }}
+      {{- if $imagePullSecrets }}
+      imagePullSecrets:
+        {{- $imagePullSecrets | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: metrics-aggregator
+          image: {{ printf "%s:%s" .Values.metricsAggregator.image.repository .Values.metricsAggregator.image.tag }}
+          imagePullPolicy: {{ .Values.metricsAggregator.image.pullPolicy }}
+          command:
+            - python3
+            - /etc/metrics-aggregator/aggregator.py
+          env:
+            - name: METRICS_PORT
+              value: {{ .Values.metricsAggregator.port | quote }}
+            - name: CONFIG_PATH
+              value: /etc/metrics-aggregator/targets.json
+            - name: SCRAPE_TTL_SECONDS
+              value: {{ .Values.metricsAggregator.scrapeTtlSeconds | quote }}
+            - name: SCRAPE_TIMEOUT_SECONDS
+              value: {{ .Values.metricsAggregator.scrapeTimeoutSeconds | quote }}
+          ports:
+            - name: {{ .Values.metricsAggregator.portName }}
+              containerPort: {{ .Values.metricsAggregator.port }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.metricsAggregator.portName }}
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 3
+            failureThreshold: 3
+            successThreshold: 1
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.metricsAggregator.portName }}
+            initialDelaySeconds: 5
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+            successThreshold: 1
+          resources:
+            {{- toYaml .Values.metricsAggregator.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/metrics-aggregator
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "buildkit-service.fullname" . }}-metrics-aggregator
+{{- end }}

@@ -1,0 +1,26 @@
+{{- if and .Values.buildkit.enabled .Values.buildctlDaemonCanary.enabled .Values.buildctlDaemonCanary.publicService.enabled }}
+{{- $cfg := .Values.buildctlDaemonCanary -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $cfg.publicService.name | quote }}
+  namespace: {{ include "buildkit-service.namespace" . }}
+  labels:
+    {{- include "buildkit-service.labels" . | nindent 4 }}
+    app.kubernetes.io/component: buildctl-daemon-canary
+  {{- with $cfg.publicService.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ $cfg.publicService.type }}
+  externalTrafficPolicy: {{ $cfg.publicService.externalTrafficPolicy }}
+  ports:
+    - name: {{ $cfg.container.portName }}
+      port: {{ $cfg.publicService.port }}
+      protocol: {{ $cfg.publicService.protocol }}
+      targetPort: {{ $cfg.publicService.targetPort }}
+  selector:
+    {{- include "buildkit-service.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: buildctl-daemon-canary
+{{- end }}

@@ -1,0 +1,51 @@
+{{- if .Values.packageMirror.enabled }}
+{{- if and .Values.packageMirror.persistence.enabled (not .Values.packageMirror.persistence.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "buildkit-service.packageMirror.fullname" . }}
+  namespace: {{ include "buildkit-service.packageMirror.namespace" . }}
+  labels:
+    {{- include "buildkit-service.packageMirror.labels" . | nindent 4 }}
+  {{- with .Values.packageMirror.persistence.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  accessModes:
+    {{- toYaml .Values.packageMirror.persistence.accessModes | nindent 4 }}
+  resources:
+    requests:
+      storage: {{ .Values.packageMirror.persistence.size }}
+  {{- with .Values.packageMirror.persistence.storageClassName }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+{{- end }}
+{{- if and .Values.packageMirror.git.persistence.enabled (not .Values.packageMirror.git.persistence.existingClaim) }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "buildkit-service.packageMirror.fullname" . }}-git
+  namespace: {{ include "buildkit-service.packageMirror.namespace" . }}
+  labels:
+    {{- include "buildkit-service.packageMirror.labels" . | nindent 4 }}
+    app.kubernetes.io/component: git
+  {{- with .Values.packageMirror.git.persistence.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  accessModes:
+    {{- toYaml .Values.packageMirror.git.persistence.accessModes | nindent 4 }}
+  resources:
+    requests:
+      storage: {{ .Values.packageMirror.git.persistence.size }}
+  {{- with .Values.packageMirror.git.persistence.storageClassName }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+{{- end }}
+{{- /* registry mirror caches use StatefulSet volumeClaimTemplates (one PVC
+   per replica); see package-mirror-registry-deployment.yaml. */}}
+
+{{- end }}

@@ -1,0 +1,79 @@
+package main
+
+import (
+	"archive/zip"
+	"bytes"
+	"errors"
+	"net/url"
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestBuildOptionsFromQueryAcceptsOneshot(t *testing.T) {
+	q := url.Values{}
+	q.Set("oneshot", "true")
+
+	if _, err := buildOptionsFromQuery(q, "tcp://127.0.0.1:9094", "/tmp/result.lmdb", "/tmp/logs.jsonl"); err != nil {
+		t.Fatalf("expected oneshot to be an accepted query key, got %v", err)
+	}
+}
+
+func TestBuildOptionsFromQueryRejectsUnknownKey(t *testing.T) {
+	q := url.Values{}
+	q.Set("bogus", "1")
+
+	if _, err := buildOptionsFromQuery(q, "tcp://127.0.0.1:9094", "/tmp/result.lmdb", "/tmp/logs.jsonl"); err == nil {
+		t.Fatal("expected unknown query key to be rejected")
+	}
+}
+
+func TestTriggerShutdownIsIdempotent(t *testing.T) {
+	srv := &daemonServer{shutdownCh: make(chan struct{})}
+
+	srv.triggerShutdown()
+	srv.triggerShutdown() // must not panic on a second close
+
+	select {
+	case <-srv.shutdownCh:
+	default:
+		t.Fatal("expected shutdown channel to be closed after triggerShutdown")
+	}
+}
+
+func TestBatchArchiveLimits(t *testing.T) {
+	zipPath := filepath.Join(t.TempDir(), "source.zip")
+	var buffer bytes.Buffer
+	writer := zip.NewWriter(&buffer)
+	for name, content := range map[string]string{
+		"image/Dockerfile":    "FROM scratch\n",
+		"image/metadata.json": `{"target":"example.com/team/image:v1"}`,
+	} {
+		entry, err := writer.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := entry.Write([]byte(content)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(zipPath, buffer.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := validateBuildArchive(zipPath, 1<<20, 1); !errors.Is(err, errDaemonArchiveLimit) {
+		t.Fatalf("expected file-count limit error, got %v", err)
+	}
+	if _, err := validateBuildArchive(zipPath, 4, 10); !errors.Is(err, errDaemonArchiveLimit) {
+		t.Fatalf("expected extracted-size limit error, got %v", err)
+	}
+	if _, err := validateBuildArchive(zipPath, 1<<20, 10); err != nil {
+		t.Fatalf("expected valid archive within limits: %v", err)
+	}
+	if err := extractZip(zipPath, filepath.Join(t.TempDir(), "output"), 1<<20, 10); err != nil {
+		t.Fatalf("expected archive within limits to extract: %v", err)
+	}
+}

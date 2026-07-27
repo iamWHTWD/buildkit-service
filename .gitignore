@@ -1,0 +1,21 @@
+/source.zip
+/cmd/buildctl-daemon/test/source.zip
+/.buildctl-batch.state
+/scripts/.buildctl-batch.state
+/result.jsonl
+/bin/buildctl-batch
+/source
+/bin/buildctl-daemon
+/buildctl-daemon
+/infra/
+
+# Local infrastructure state and credentials must never be committed.
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+kubeconfig
+kubeconfig.*
+__pycache__/
+*.pyc

@@ -1,0 +1,201 @@
+{{- if .Values.buildkit.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "buildkit-service.fullname" . }}
+  namespace: {{ include "buildkit-service.namespace" . }}
+  labels:
+    {{- include "buildkit-service.labels" . | nindent 4 }}
+    app.kubernetes.io/component: buildkitd
+spec:
+  replicas: {{ .Values.deployment.replicas }}
+  progressDeadlineSeconds: {{ .Values.deployment.progressDeadlineSeconds }}
+  revisionHistoryLimit: {{ .Values.deployment.revisionHistoryLimit }}
+  strategy:
+    {{- toYaml .Values.deployment.strategy | nindent 4 }}
+  selector:
+    matchLabels:
+      {{- include "buildkit-service.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "buildkit-service.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: buildkitd
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- if or .Values.podAnnotations .Values.buildkitdConfig.enabled }}
+      annotations:
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- if .Values.buildkitdConfig.enabled }}
+        checksum/buildkitd-config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- end }}
+      {{- end }}
+    spec:
+      {{- $affinity := .Values.affinity | default dict }}
+      {{- $podAntiAffinity := get $affinity "podAntiAffinity" | default dict }}
+      affinity:
+        {{- with (get $affinity "nodeAffinity") }}
+        nodeAffinity:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        {{- with (get $affinity "podAffinity") }}
+        podAffinity:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        {{- if or .Values.scheduling.singlePodPerNode $podAntiAffinity }}
+        podAntiAffinity:
+          {{- with $podAntiAffinity.preferredDuringSchedulingIgnoredDuringExecution }}
+          preferredDuringSchedulingIgnoredDuringExecution:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          requiredDuringSchedulingIgnoredDuringExecution:
+            {{- with $podAntiAffinity.requiredDuringSchedulingIgnoredDuringExecution }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+            {{- if .Values.scheduling.singlePodPerNode }}
+            - labelSelector:
+                matchLabels:
+                  {{- include "buildkit-service.selectorLabels" . | nindent 18 }}
+                  app.kubernetes.io/component: buildkitd
+              topologyKey: kubernetes.io/hostname
+            {{- end }}
+        {{- end }}
+      containers:
+        - name: {{ .Values.container.name }}
+          command:
+            {{- range .Values.container.command }}
+            - {{ . | quote }}
+            {{- end }}
+            {{- if .Values.buildkitdConfig.enabled }}
+            - --config
+            - {{ .Values.buildkitdConfig.path | quote }}
+            {{- end }}
+          image: {{ include "buildkit-service.image" . }}
+          imagePullPolicy: {{ include "buildkit-service.imagePullPolicy" . }}
+          {{- if .Values.container.startupProbe.enabled }}
+          startupProbe:
+            failureThreshold: {{ .Values.container.startupProbe.failureThreshold }}
+            initialDelaySeconds: {{ .Values.container.startupProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.container.startupProbe.periodSeconds }}
+            successThreshold: {{ .Values.container.startupProbe.successThreshold }}
+            tcpSocket:
+              port: {{ .Values.container.portName }}
+            timeoutSeconds: {{ .Values.container.startupProbe.timeoutSeconds }}
+          {{- end }}
+          livenessProbe:
+            failureThreshold: {{ .Values.container.livenessProbe.failureThreshold }}
+            initialDelaySeconds: {{ .Values.container.livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.container.livenessProbe.periodSeconds }}
+            successThreshold: {{ .Values.container.livenessProbe.successThreshold }}
+            tcpSocket:
+              port: {{ .Values.container.portName }}
+            timeoutSeconds: {{ .Values.container.livenessProbe.timeoutSeconds }}
+          ports:
+            - containerPort: {{ .Values.container.port }}
+              name: {{ .Values.container.portName }}
+              protocol: {{ .Values.container.protocol }}
+          readinessProbe:
+            failureThreshold: {{ .Values.container.readinessProbe.failureThreshold }}
+            initialDelaySeconds: {{ .Values.container.readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.container.readinessProbe.periodSeconds }}
+            successThreshold: {{ .Values.container.readinessProbe.successThreshold }}
+            tcpSocket:
+              port: {{ .Values.container.portName }}
+            timeoutSeconds: {{ .Values.container.readinessProbe.timeoutSeconds }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.container.securityContext | nindent 12 }}
+          terminationMessagePath: {{ .Values.terminationMessagePath }}
+          terminationMessagePolicy: {{ .Values.terminationMessagePolicy }}
+          volumeMounts:
+            {{- toYaml .Values.volumeMounts | nindent 12 }}
+            {{- if .Values.buildkitdConfig.enabled }}
+            - name: buildkitd-config
+              mountPath: {{ .Values.buildkitdConfig.path | quote }}
+              subPath: buildkitd.toml
+              readOnly: true
+            {{- end }}
+        {{- if .Values.buildkitdCacheMetrics.enabled }}
+        # Cache-usage exporter: reports buildkitd cache used/total bytes from the
+        # lib-buildkit volume. buildkitd itself exposes no cumulative build or
+        # cache metrics in this fork, so cache size is measured from disk.
+        - name: cache-metrics
+          image: {{ printf "%s:%s" .Values.buildkitdCacheMetrics.image.repository .Values.buildkitdCacheMetrics.image.tag }}
+          imagePullPolicy: {{ .Values.buildkitdCacheMetrics.image.pullPolicy }}
+          command:
+            - python3
+            - /etc/buildkitd-cache-metrics/dir-size-exporter.py
+          env:
+            - name: METRICS_PORT
+              value: {{ .Values.buildkitdCacheMetrics.port | quote }}
+            - name: METRIC_PREFIX
+              value: buildkit_service
+            - name: TARGETS
+              value: {{ printf "buildkit=%s" .Values.buildkitdCacheMetrics.cacheDir | quote }}
+            - name: DIR_STATS_TTL_SECONDS
+              value: {{ .Values.buildkitdCacheMetrics.dirStatsTtlSeconds | quote }}
+          ports:
+            - name: {{ .Values.buildkitdCacheMetrics.portName }}
+              containerPort: {{ .Values.buildkitdCacheMetrics.port }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.buildkitdCacheMetrics.portName }}
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 3
+            failureThreshold: 3
+            successThreshold: 1
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.buildkitdCacheMetrics.portName }}
+            initialDelaySeconds: 5
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+            successThreshold: 1
+          resources:
+            {{- toYaml .Values.buildkitdCacheMetrics.resources | nindent 12 }}
+          volumeMounts:
+            - name: lib-buildkit
+              mountPath: {{ .Values.buildkitdCacheMetrics.cacheDir }}
+              readOnly: true
+            - name: buildkitd-cache-metrics
+              mountPath: /etc/buildkitd-cache-metrics/dir-size-exporter.py
+              subPath: dir-size-exporter.py
+              readOnly: true
+        {{- end }}
+      dnsPolicy: {{ .Values.dnsPolicy }}
+      {{- $imagePullSecrets := include "buildkit-service.renderImagePullSecrets" . }}
+      {{- if $imagePullSecrets }}
+      imagePullSecrets:
+        {{- $imagePullSecrets | nindent 8 }}
+      {{- end }}
+      restartPolicy: {{ .Values.restartPolicy }}
+      schedulerName: {{ .Values.schedulerName }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      volumes:
+        {{- toYaml .Values.volumes | nindent 8 }}
+        {{- if .Values.buildkitdConfig.enabled }}
+        - name: buildkitd-config
+          configMap:
+            name: {{ include "buildkit-service.fullname" . }}-buildkitd
+        {{- end }}
+        {{- if .Values.buildkitdCacheMetrics.enabled }}
+        - name: buildkitd-cache-metrics
+          configMap:
+            name: {{ include "buildkit-service.fullname" . }}-cache-metrics
+        {{- end }}
+{{- end }}

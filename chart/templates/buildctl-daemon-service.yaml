@@ -1,0 +1,26 @@
+{{- if and .Values.buildkit.enabled .Values.buildctlDaemon.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "buildkit-service.buildctlDaemonName" . }}
+  namespace: {{ include "buildkit-service.namespace" . }}
+  labels:
+    {{- include "buildkit-service.labels" . | nindent 4 }}
+    app.kubernetes.io/component: buildctl-daemon
+spec:
+  type: {{ .Values.buildctlDaemon.service.type }}
+  ports:
+    - name: {{ .Values.buildctlDaemon.container.portName }}
+      port: {{ .Values.buildctlDaemon.service.port }}
+      protocol: {{ .Values.buildctlDaemon.service.protocol }}
+      targetPort: {{ .Values.buildctlDaemon.service.targetPort }}
+    {{- if .Values.buildctlDaemon.pprof.enabled }}
+    - name: {{ .Values.buildctlDaemon.pprof.portName }}
+      port: {{ .Values.buildctlDaemon.pprof.port }}
+      protocol: {{ .Values.buildctlDaemon.pprof.protocol }}
+      targetPort: {{ .Values.buildctlDaemon.pprof.portName }}
+    {{- end }}
+  selector:
+    {{- include "buildkit-service.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: buildctl-daemon
+{{- end }}

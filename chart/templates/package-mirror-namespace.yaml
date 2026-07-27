@@ -1,0 +1,13 @@
+{{- if .Values.packageMirror.enabled }}
+{{- $namespace := include "buildkit-service.packageMirror.namespace" . }}
+{{- if and $namespace (ne $namespace .Release.Namespace) (not (lookup "v1" "Namespace" "" $namespace)) }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $namespace }}
+  annotations:
+    helm.sh/resource-policy: keep
+  labels:
+    {{- include "buildkit-service.packageMirror.labels" . | nindent 4 }}
+{{- end }}
+{{- end }}

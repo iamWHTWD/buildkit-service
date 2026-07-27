@@ -1,0 +1,50 @@
+{{- $pdb := .Values.packageMirror.podDisruptionBudget | default dict -}}
+{{- if and .Values.packageMirror.enabled (get $pdb "enabled") }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "buildkit-service.packageMirror.fullname" . }}
+  namespace: {{ include "buildkit-service.packageMirror.namespace" . }}
+  labels:
+    {{- include "buildkit-service.packageMirror.labels" . | nindent 4 }}
+spec:
+  maxUnavailable: {{ get $pdb "maxUnavailable" | default 1 }}
+  selector:
+    matchLabels:
+      {{- include "buildkit-service.packageMirror.selectorLabels" . | nindent 6 }}
+{{- if .Values.packageMirror.git.standalone }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "buildkit-service.packageMirror.gitFullname" . }}
+  namespace: {{ include "buildkit-service.packageMirror.namespace" . }}
+  labels:
+    {{- include "buildkit-service.packageMirror.labels" . | nindent 4 }}
+    app.kubernetes.io/component: git
+spec:
+  maxUnavailable: {{ get $pdb "maxUnavailable" | default 1 }}
+  selector:
+    matchLabels:
+      {{- include "buildkit-service.packageMirror.gitSelectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: git
+{{- end }}
+{{- $selectedMirrors := include "buildkit-service.packageMirror.selectedRegistryMirrors" . | fromYamlArray -}}
+{{- range $selectedMirrors }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "buildkit-service.packageMirror.fullname" $ }}-registry-{{ .name }}
+  namespace: {{ include "buildkit-service.packageMirror.namespace" $ }}
+  labels:
+    {{- include "buildkit-service.packageMirror.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ .serviceName }}
+spec:
+  maxUnavailable: {{ get $pdb "maxUnavailable" | default 1 }}
+  selector:
+    matchLabels:
+      {{- include "buildkit-service.packageMirror.registrySelectorLabels" $ | nindent 6 }}
+      app.kubernetes.io/component: {{ .serviceName }}
+{{- end }}
+{{- end }}

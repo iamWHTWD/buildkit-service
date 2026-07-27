@@ -1,0 +1,409 @@
+{{- if .Values.packageMirror.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "buildkit-service.packageMirror.fullname" . }}
+  namespace: {{ include "buildkit-service.packageMirror.namespace" . }}
+  labels:
+    {{- include "buildkit-service.packageMirror.labels" . | nindent 4 }}
+data:
+  # apt-cacher-ng's built-in Remap-debrep/Remap-uburep rules read these backend
+  # files. Override them so Debian/Ubuntu traffic always goes to the configured
+  # domestic mirror instead of the package's large built-in mirror list, whose
+  # randomly selected upstreams can return 400 for InRelease under proxy/remap
+  # traffic. Ubuntu security uses a distinct security.ubuntu.com/ubuntu prefix
+  # in proxy-mode apt requests, so map that host prefix explicitly below.
+  backends_debian: |
+    {{ .Values.packageMirror.aptYum.env.aptMirror }}/debian/
+  backends_ubuntu: |
+    {{ .Values.packageMirror.aptYum.env.aptMirror }}/ubuntu/
+
+  # verdaccio configuration: a transparent npm proxy that caches the upstream
+  # registry. Anonymous read access is allowed; publishing is disabled.
+  verdaccio-config.yaml: |
+    storage: /verdaccio/storage
+    web:
+      title: package-mirror npm
+    auth:
+      htpasswd:
+        file: /verdaccio/storage/htpasswd
+        max_users: -1
+    uplinks:
+      upstream:
+        url: {{ .Values.packageMirror.npm.env.upstreamUrl | quote }}
+        cache: true
+        maxage: {{ printf "%dm" (int .Values.packageMirror.npm.env.maxAgeMinutes) | quote }}
+        timeout: {{ .Values.packageMirror.npm.env.fetchTimeout | quote }}
+        max_fails: {{ int .Values.packageMirror.npm.env.maxFails }}
+        fail_timeout: {{ .Values.packageMirror.npm.env.failTimeout | quote }}
+    packages:
+      '@*/*':
+        access: $all
+        publish: $authenticated
+        proxy: upstream
+      '**':
+        access: $all
+        publish: $authenticated
+        proxy: upstream
+    server:
+      keepAliveTimeout: 60
+    middlewares:
+      audit:
+        enabled: true
+    log:
+      type: stdout
+      format: pretty
+      level: info
+    listen:
+      - 0.0.0.0:{{ .Values.packageMirror.npm.port }}
+
+  # Supplemental apt-cacher-ng configuration. apt-cacher-ng serves both apt and
+  # yum/dnf clients on the same port. It is used as a forward HTTP proxy; the
+  # remap rules below default the well-known distro paths to the domestic
+  # mirrors, and PassThroughPattern allows HTTPS CONNECT tunnelling.
+  acng-package-mirror.conf: |
+    CacheDir: /var/cache/apt-cacher-ng
+    # Write access logs into the shared cache volume so the metrics sidecar can
+    # compute real hit/miss counters from them (the acng report page needs a
+    # POST to materialize its stats table and is not machine-friendly). The
+    # cache root always exists, so no image/entrypoint change is required.
+    LogDir: /var/cache/apt-cacher-ng
+    ExThreshold: {{ int .Values.packageMirror.aptYum.env.expThreshold }}
+    MaxConThreads: {{ int .Values.packageMirror.aptYum.env.maxConThreads }}
+    MaxStandbyConThreads: {{ int .Values.packageMirror.aptYum.env.maxStandbyConThreads }}
+    PassThroughPattern: .*
+    # Guard against misconfigured clients that set both:
+    #   sources.list -> http://apt-yum.../ubuntu (remap mode)
+    #   Acquire::http::Proxy -> http://apt-yum... (proxy mode)
+    # Such proxy-to-self requests can create partial/corrupt cache entries under
+    # apt-yum.package-mirror.svc.cluster.local/. Serve them if they happen, but
+    # never store them in cache.
+    # Keep volatile repository metadata out of the shared cache. High-concurrency
+    # apt update and yum makecache can otherwise race on volatile repository
+    # metadata such as dists/*/Packages.xz and repodata/*.sqlite.bz2, causing
+    # truncated transfers while package payload files remain safe to cache.
+    DontCacheRequested: {{ .Values.packageMirror.aptYum.serviceName }}(\.{{ include "buildkit-service.packageMirror.namespace" . }}(\.svc(\.cluster\.local)?)?)?/ .*InRelease$ .*Release$ .*Release\.gpg$ .*dists/.*/(Packages|Sources|Contents|Translation-[^/]*)(\.(gz|xz|bz2|lzma|zst))?$ .*repodata/.* .*APKINDEX\.tar\.gz$
+    Remap-ubusec: security.ubuntu.com/ubuntu ; {{ .Values.packageMirror.aptYum.env.aptMirror }}/ubuntu
+    Remap-centos: /centos ; {{ .Values.packageMirror.aptYum.env.centosMirror }}
+    Remap-epel: /epel ; {{ .Values.packageMirror.aptYum.env.epelMirror }}
+    Remap-fedora: /fedora ; {{ .Values.packageMirror.aptYum.env.fedoraMirror }}
+    Remap-alpine: /alpine ; {{ .Values.packageMirror.aptYum.env.alpineMirror }}
+    # apt-cacher-ng is deb/rpm-centric by default; extend its file patterns so
+    # Alpine apk indexes (volatile) and packages (cacheable) are handled too.
+    VfilePatternEx: (^|.*/)APKINDEX\.tar\.gz$
+    PfilePatternEx: \.apk$
+
+  # Unified metrics exporter (stdlib-only Python). Runs in the metrics sidecar,
+  # probes each backend's health endpoint over localhost, parses apt-cacher-ng's
+  # access log (shared via the cache volume) for real hit/miss counters, and
+  # reports cached file count/bytes per backend from the shared cache volume.
+  # Exposes Prometheus text on /metrics and a 200 on /healthz. Only single { }
+  # braces are used so Helm leaves it as-is.
+  metrics-exporter.py: |
+    #!/usr/bin/env python3
+    """Unified cache-metrics exporter for package-mirror."""
+    import os
+    import time
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from urllib.request import urlopen
+
+    CACHE_DIR = os.environ.get("CACHE_DIR", "/cache")
+    PORT = int(os.environ.get("METRICS_PORT", "9090"))
+    PIP_PORT = os.environ.get("PIP_PORT", "5000")
+    NPM_PORT = os.environ.get("NPM_PORT", "4873")
+    APT_PORT = os.environ.get("APT_PORT", "3142")
+    GIT_PORT = os.environ.get("GIT_PORT", "8080")
+
+    # name, cache subdir, health url
+    BACKENDS = [
+        ("pip", "proxpi", "http://127.0.0.1:%s/health" % PIP_PORT),
+        ("npm", "verdaccio", "http://127.0.0.1:%s/-/ping" % NPM_PORT),
+        ("apt-yum", "apt-cacher-ng", "http://127.0.0.1:%s/acng-report.html" % APT_PORT),
+        ("git", "git-mirror", "http://127.0.0.1:%s/healthz" % GIT_PORT),
+    ]
+    # apt-cacher-ng access log (LogDir points into the shared cache volume).
+    # Lines look like: epoch|I|bytes|client|path (I = fetched from upstream)
+    #                  epoch|O|bytes|client|path (O = served to a client)
+    APT_LOG = os.environ.get(
+        "APT_LOG", os.path.join(CACHE_DIR, "apt-cacher-ng", "apt-cacher.log"))
+
+    _DIR_CACHE = {}
+    _DIR_TTL = float(os.environ.get("DIR_STATS_TTL_SECONDS", "60"))
+
+
+    def probe(url):
+        try:
+            with urlopen(url, timeout=5) as r:
+                body = r.read().decode("utf-8", "replace")
+                return (1 if getattr(r, "status", 200) < 500 else 0), body
+        except Exception:
+            return 0, ""
+
+
+    def dir_stats(subdir):
+        now = time.time()
+        cached = _DIR_CACHE.get(subdir)
+        if cached and now - cached[0] < _DIR_TTL:
+            return cached[1], cached[2]
+        path = os.path.join(CACHE_DIR, subdir)
+        files = 0
+        total = 0
+        for root, _dirs, names in os.walk(path):
+            for n in names:
+                try:
+                    total += os.stat(os.path.join(root, n)).st_size
+                    files += 1
+                except OSError:
+                    pass
+        _DIR_CACHE[subdir] = (now, files, total)
+        return files, total
+
+
+    def cache_capacity(subdir):
+        for path in (os.path.join(CACHE_DIR, subdir), CACHE_DIR):
+            try:
+                st = os.statvfs(path)
+                return st.f_blocks * st.f_frsize
+            except OSError:
+                continue
+        return 0
+
+
+    def parse_apt():
+        """Aggregate acng access-log counters (cached with the dir-stats TTL).
+
+        Every served request logs an O line; upstream fetches log an I line, so
+        misses = I lines and hits = O lines - I lines. Byte counters give the
+        transfer-level view (out = to clients, in = from upstream).
+        """
+        now = time.time()
+        cached = _DIR_CACHE.get("__apt_log__")
+        if cached and now - cached[0] < _DIR_TTL:
+            return cached[1]
+        parsed = 0
+        reqs = misses = bytes_in = bytes_out = 0
+        try:
+            with open(APT_LOG, "r", errors="replace") as f:
+                for line in f:
+                    parts = line.split("|", 3)
+                    if len(parts) < 3:
+                        continue
+                    try:
+                        size = int(parts[2])
+                    except ValueError:
+                        continue
+                    if parts[1] == "O":
+                        reqs += 1
+                        bytes_out += size
+                    elif parts[1] == "I":
+                        misses += 1
+                        bytes_in += size
+            parsed = 1
+        except OSError:
+            pass
+        hits = max(reqs - misses, 0)
+        result = (parsed, hits, misses, bytes_in, bytes_out)
+        _DIR_CACHE["__apt_log__"] = (now, result)
+        return result
+
+
+    def render():
+        out = []
+        out.append("# HELP package_mirror_backend_up Whether each backend answers its health check (1=up).")
+        out.append("# TYPE package_mirror_backend_up gauge")
+        out.append("# HELP package_mirror_cache_files Number of cached files on disk per backend.")
+        out.append("# TYPE package_mirror_cache_files gauge")
+        out.append("# HELP package_mirror_cache_used_bytes Total size of cached files on disk per backend.")
+        out.append("# TYPE package_mirror_cache_used_bytes gauge")
+        out.append("# HELP package_mirror_cache_total_bytes Capacity of the filesystem backing each backend cache.")
+        out.append("# TYPE package_mirror_cache_total_bytes gauge")
+
+        for name, subdir, health in BACKENDS:
+            up, _body = probe(health)
+            out.append('package_mirror_backend_up{backend="%s"} %d' % (name, up))
+            files, total = dir_stats(subdir)
+            out.append('package_mirror_cache_files{backend="%s"} %d' % (name, files))
+            out.append('package_mirror_cache_used_bytes{backend="%s"} %d' % (name, total))
+            out.append('package_mirror_cache_total_bytes{backend="%s"} %d' % (name, cache_capacity(subdir)))
+
+        parsed, hits, misses, bytes_in, bytes_out = parse_apt()
+        out.append("# HELP package_mirror_apt_cache_hits Requests served from cache (access-log O lines minus I lines).")
+        out.append("# TYPE package_mirror_apt_cache_hits counter")
+        out.append("package_mirror_apt_cache_hits %d" % hits)
+        out.append("# HELP package_mirror_apt_cache_misses Requests fetched from upstream (access-log I lines).")
+        out.append("# TYPE package_mirror_apt_cache_misses counter")
+        out.append("package_mirror_apt_cache_misses %d" % misses)
+        out.append("# HELP package_mirror_apt_bytes_out_total Bytes served to clients per the acng access log.")
+        out.append("# TYPE package_mirror_apt_bytes_out_total counter")
+        out.append("package_mirror_apt_bytes_out_total %d" % bytes_out)
+        out.append("# HELP package_mirror_apt_bytes_in_total Bytes fetched from upstream per the acng access log.")
+        out.append("# TYPE package_mirror_apt_bytes_in_total counter")
+        out.append("package_mirror_apt_bytes_in_total %d" % bytes_in)
+        out.append("# HELP package_mirror_apt_report_parsed Whether the apt-cacher-ng access log was readable (1=yes).")
+        out.append("# TYPE package_mirror_apt_report_parsed gauge")
+        out.append("package_mirror_apt_report_parsed %d" % parsed)
+
+        # Request totals. apt-cacher-ng exposes real hit/miss counters, so its
+        # request total is hits+misses. Other backends do not expose native
+        # counters here; their request totals are reported by their own systems.
+        out.append("# HELP package_mirror_requests_total Requests served per backend (best effort).")
+        out.append("# TYPE package_mirror_requests_total counter")
+        if parsed:
+            out.append('package_mirror_requests_total{backend="apt-yum"} %d' % (hits + misses))
+
+        return "\n".join(out) + "\n"
+
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path.startswith("/healthz"):
+                self._respond(200, "text/plain", "ok\n")
+                return
+            if self.path.startswith("/metrics") or self.path == "/":
+                try:
+                    body = render()
+                except Exception as exc:
+                    self._respond(500, "text/plain", "error: %s\n" % exc)
+                    return
+                self._respond(200, "text/plain; version=0.0.4", body)
+                return
+            self._respond(404, "text/plain", "not found\n")
+
+        def _respond(self, code, ctype, body):
+            data = body.encode("utf-8")
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, *_args):
+            pass
+
+
+    def main():
+        ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
+
+
+    if __name__ == "__main__":
+        main()
+
+  # Generic high-water cache janitor, used by sidecars for cache backends that
+  # do not provide reliable online size-based GC themselves.
+  cache-gc.py: |
+    #!/usr/bin/env python3
+    """Size-based cache janitor for package-mirror emptyDir caches."""
+    import os
+    import re
+    import shutil
+    import time
+
+    # Semicolon-separated entries:
+    #   label=/path:max_bytes:target_ratio
+    TARGETS = os.environ.get("CACHE_GC_TARGETS", "")
+    INTERVAL = int(os.environ.get("CACHE_GC_INTERVAL_SECONDS", "120"))
+    MIN_AGE = int(os.environ.get("CACHE_GC_MIN_AGE_SECONDS", "300"))
+    EXCLUDE_RE = re.compile(os.environ.get("CACHE_GC_EXCLUDE_REGEX", r"a^"))
+
+
+    def log(msg):
+      print(msg, flush=True)
+
+
+    def parse_targets(raw):
+      targets = []
+      for item in raw.split(";"):
+        item = item.strip()
+        if not item:
+          continue
+        label_path, max_bytes, ratio = item.rsplit(":", 2)
+        label, path = label_path.split("=", 1)
+        targets.append((label, path, int(max_bytes), float(ratio)))
+      return targets
+
+
+    def should_skip(path):
+      return bool(EXCLUDE_RE.search(path))
+
+
+    def scan(path):
+      total = 0
+      files = []
+      now = time.time()
+      for root, _dirs, names in os.walk(path):
+        for name in names:
+          full = os.path.join(root, name)
+          if should_skip(full):
+            continue
+          try:
+            st = os.lstat(full)
+          except OSError:
+            continue
+          if not os.path.isfile(full):
+            continue
+          total += st.st_size
+          if now - st.st_mtime >= MIN_AGE:
+            files.append((st.st_mtime, full, st.st_size))
+      return total, files
+
+
+    def remove_empty_dirs(path):
+      for root, dirs, _names in os.walk(path, topdown=False):
+        for name in dirs:
+          full = os.path.join(root, name)
+          if should_skip(full):
+            continue
+          try:
+            os.rmdir(full)
+          except OSError:
+            pass
+
+
+    def gc_target(label, path, max_bytes, ratio):
+      if max_bytes <= 0 or not os.path.isdir(path):
+        return
+      total, files = scan(path)
+      if total <= max_bytes:
+        return
+      target = int(max_bytes * ratio)
+      files.sort(key=lambda item: item[0])
+      freed = 0
+      removed = 0
+      for _mtime, full, size in files:
+        if total - freed <= target:
+          break
+        try:
+          os.remove(full)
+        except IsADirectoryError:
+          shutil.rmtree(full, ignore_errors=True)
+        except OSError:
+          continue
+        freed += size
+        removed += 1
+      remove_empty_dirs(path)
+      log("cache-gc %s: usage=%d high=%d target=%d removed=%d freed=%d" % (
+        label, total, max_bytes, target, removed, freed))
+
+
+    def main():
+      targets = parse_targets(TARGETS)
+      log("cache-gc enabled: targets=%s interval=%ds min_age=%ds" % (
+        ",".join(label for label, _path, _max, _ratio in targets), INTERVAL, MIN_AGE))
+      while True:
+        for target in targets:
+          try:
+            gc_target(*target)
+          except Exception as exc:
+            log("cache-gc %s error: %s" % (target[0], exc))
+        time.sleep(max(INTERVAL, 30))
+
+
+    if __name__ == "__main__":
+      main()
+
+  # Generic directory-size exporter, used by the per-registry cache sidecar to
+  # report registry_mirror cache used/total bytes from the registry data volume.
+  dir-size-exporter.py: |
+{{ include "buildkit-service.dirSizeExporterScript" . | indent 4 }}
+
+{{- end }}

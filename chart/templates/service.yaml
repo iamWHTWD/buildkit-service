@@ -1,0 +1,28 @@
+{{- if .Values.buildkit.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "buildkit-service.fullname" . }}
+  namespace: {{ include "buildkit-service.namespace" . }}
+  labels:
+    {{- include "buildkit-service.labels" . | nindent 4 }}
+    app.kubernetes.io/component: buildkitd
+spec:
+  clusterIP: {{ .Values.service.clusterIP }}
+  clusterIPs:
+    {{- toYaml .Values.service.clusterIPs | nindent 4 }}
+  internalTrafficPolicy: {{ .Values.service.internalTrafficPolicy }}
+  ipFamilies:
+    {{- toYaml .Values.service.ipFamilies | nindent 4 }}
+  ipFamilyPolicy: {{ .Values.service.ipFamilyPolicy }}
+  ports:
+    - name: {{ .Values.container.portName }}
+      port: {{ .Values.service.port }}
+      protocol: {{ .Values.container.protocol }}
+      targetPort: {{ .Values.service.targetPort }}
+  selector:
+    {{- include "buildkit-service.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: buildkitd
+  sessionAffinity: {{ .Values.service.sessionAffinity }}
+  type: {{ .Values.service.type }}
+{{- end }}

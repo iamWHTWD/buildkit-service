@@ -1,0 +1,9 @@
+apiVersion: v2
+name: buildkit-service
+description: Helm chart for deploying the buildkit service workload
+type: application
+version: 0.1.0
+appVersion: "v1"
+home: https://github.com/inclusionAI/buildkit-service
+sources:
+  - https://github.com/inclusionAI/buildkit-service

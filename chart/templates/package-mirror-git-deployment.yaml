@@ -1,0 +1,76 @@
+{{- if and .Values.packageMirror.enabled .Values.packageMirror.git.standalone }}
+{{- if and .Values.packageMirror.persistence.enabled (not .Values.packageMirror.git.persistence.enabled) -}}
+{{- fail "packageMirror.git.standalone requires git.persistence.enabled or persistence.enabled=false (the standalone git Deployment cannot share the main pod's global cache PVC)" -}}
+{{- end }}
+{{- $topologySpread := .Values.packageMirror.topologySpread | default dict -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "buildkit-service.packageMirror.gitFullname" . }}
+  namespace: {{ include "buildkit-service.packageMirror.namespace" . }}
+  labels:
+    {{- include "buildkit-service.packageMirror.labels" . | nindent 4 }}
+    app.kubernetes.io/component: git
+spec:
+  replicas: {{ .Values.packageMirror.git.replicaCount | default .Values.packageMirror.deployment.replicaCount }}
+  strategy:
+    {{- toYaml .Values.packageMirror.deployment.strategy | nindent 4 }}
+  selector:
+    matchLabels:
+      {{- include "buildkit-service.packageMirror.gitSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "buildkit-service.packageMirror.gitSelectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: git
+        {{- with .Values.packageMirror.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.packageMirror.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.packageMirror.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.packageMirror.podSecurityContext | nindent 8 }}
+      containers:
+        {{- include "buildkit-service.packageMirror.gitContainer" . | nindent 8 }}
+      {{- with (default .Values.packageMirror.nodeSelector .Values.packageMirror.git.nodeSelector) }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with (default .Values.packageMirror.affinity .Values.packageMirror.git.affinity) }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if (get $topologySpread "enabled") }}
+      topologySpreadConstraints:
+        - maxSkew: {{ get $topologySpread "maxSkew" | default 1 }}
+          topologyKey: {{ get $topologySpread "topologyKey" | default "kubernetes.io/hostname" | quote }}
+          whenUnsatisfiable: {{ get $topologySpread "whenUnsatisfiable" | default "ScheduleAnyway" }}
+          labelSelector:
+            matchLabels:
+              {{- include "buildkit-service.packageMirror.gitSelectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: git
+      {{- end }}
+      {{- with (default .Values.packageMirror.tolerations .Values.packageMirror.git.tolerations) }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      volumes:
+        {{- if .Values.packageMirror.git.persistence.enabled }}
+        - name: {{ include "buildkit-service.packageMirror.gitCacheVolumeName" . }}
+          persistentVolumeClaim:
+            claimName: {{ default (include "buildkit-service.packageMirror.gitFullname" .) .Values.packageMirror.git.persistence.existingClaim }}
+        {{- else }}
+        - name: {{ include "buildkit-service.packageMirror.gitCacheVolumeName" . }}
+          emptyDir:
+            {{- with .Values.packageMirror.persistence.emptyDir.gitSizeLimit }}
+            sizeLimit: {{ . }}
+            {{- end }}
+        {{- end }}
+{{- end }}
