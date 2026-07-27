@@ -9,9 +9,11 @@ apt, yum/dnf, apk, git, and Docker/BuildKit `FROM` image pulls.
 Use the minimal setup below in your images. All Services live in the
 `package-mirror` namespace and listen on port 80.
 
-The chart enables an ingress NetworkPolicy by default. It allows clients from
-the package-mirror namespace itself and `buildkit-service`. Add other trusted
-client namespaces through `packageMirror.networkPolicy.allowedNamespaces`.
+The chart ships an opt-in ingress NetworkPolicy
+(`packageMirror.networkPolicy.enabled`). When enabled it allows clients from
+the package-mirror namespace itself and `buildkit-service`; add other trusted
+client namespaces through `packageMirror.networkPolicy.allowedNamespaces`
+before enabling it, or cross-namespace clients lose cache access.
 
 The cache Services are unauthenticated plain HTTP endpoints intended only for
 a trusted cluster network. Do not expose them publicly. Use Kubernetes
@@ -474,8 +476,8 @@ quickstart profile additionally tightens cache and API limits. Add replicas,
 node-pool scheduling, and persistence explicitly for production.
 
 `packageMirror.pip.env.cacheSize` must be an integer byte count (no `1GiB`
-strings). The default `1073741824` is 1 GiB; keep it well below the
-`cache-pip` emptyDir sizeLimit (default 2Gi) because proxpi evicts lazily —
+strings). The default `17179869184` is 16 GiB; keep it well below the
+`cache-pip` emptyDir sizeLimit (default 30Gi) because proxpi evicts lazily —
 equality guarantees kubelet evicting the whole pod.
 
 For a small single-replica installation, one RWO PVC can persist the main
@@ -634,11 +636,11 @@ All on port 80.
 - yum upstream: `--set packageMirror.aptYum.env.centosMirror=...` / `--set packageMirror.aptYum.env.epelMirror=...`
 - apk upstream: `--set packageMirror.aptYum.env.alpineMirror=http://dl-cdn.alpinelinux.org/alpine`
 - git refresh TTL: `--set packageMirror.git.env.cacheTtlSeconds=300`
-- git max active requests per pod: `--set packageMirror.git.env.maxActiveRequests=4`
+- git max active requests per pod: `--set packageMirror.git.env.maxActiveRequests=8`
 - git busy-wait timeout: `--set packageMirror.git.env.busyTimeoutSeconds=30`
 - git upstream command timeout: `--set packageMirror.git.env.gitTimeoutSeconds=7200` (first-time mirror clones of huge repos can exceed 30 minutes)
-- git max concurrent first-time clones: `--set packageMirror.git.env.maxConcurrentClones=1`
-- git GC high-water: `--set packageMirror.git.env.maxDiskBytes=1073741824` (default 1Gi; LRU-evicts down to 80%, keep headroom below the emptyDir `gitSizeLimit`)
+- git max concurrent first-time clones: `--set packageMirror.git.env.maxConcurrentClones=2`
+- git GC high-water: `--set packageMirror.git.env.maxDiskBytes=128849018880` (default 120Gi; LRU-evicts down to 80%, keep headroom below the emptyDir `gitSizeLimit`)
 - registry mirror upstreams/auth: edit the top-level `registries` section of `chart/values.yaml`
 - registry pull-through TTL: `--set packageMirror.registry.env.ttl=1h`
 - PDB: `--set packageMirror.podDisruptionBudget.enabled=true --set packageMirror.podDisruptionBudget.maxUnavailable=1`
