@@ -58,6 +58,24 @@ registries:
 buildkitdConfig:
   enabled: true
   path: /etc/buildkit/buildkitd.toml
+  # Optional CNI network configuration for build containers. When set, it is
+  # rendered as a cni.json key in the buildkitd ConfigMap (mounted alongside
+  # buildkitd.toml at /etc/buildkit). Requires a BuildKit image with CNI
+  # support and CNI plugins installed; pair it with worker.oci networkMode/
+  # cniConfigPath/cniBinaryPath below. Example:
+  # cniConfig:
+  #   name: buildkit
+  #   type: bridge
+  #   bridge: buildkit0
+  #   cniVersion: 0.4.0
+  #   isDefaultGateway: true
+  #   ipMasq: true
+  #   hairpinMode: true
+  #   forceAddress: false
+  #   ipam:
+  #     type: host-local
+  #     subnet: 172.30.0.0/16
+  cniConfig: {}
   # Extra manual entries. Mirrors for registries are rendered
   # automatically.
   registryMirrors: []
@@ -67,6 +85,11 @@ buildkitdConfig:
   worker:
     oci:
       gc: true
+      # Optional CNI networking (requires a CNI-capable BuildKit build):
+      # networkMode: cni
+      # cniConfigPath: /etc/buildkit/cni.json
+      # cniBinaryPath: /usr/lib/cni
+      # cniPoolSize: 16
       # gckeepstorage is the default BuildKit GC storage target in MB. Keep it
       # well below volumes[].lib-buildkit.emptyDir.sizeLimit so short bursts do
       # not make kubelet evict buildkitd before BuildKit GC can prune cache.

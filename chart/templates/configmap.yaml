@@ -7,6 +7,10 @@ metadata:
   labels:
     {{- include "buildkit-service.labels" . | nindent 4 }}
 data:
+  {{- with .Values.buildkitdConfig.cniConfig }}
+  cni.json: |
+    {{- toPrettyJson . | nindent 4 }}
+  {{- end }}
   buildkitd.toml: |
     {{- $mirrorNamespace := include "buildkit-service.packageMirror.namespace" . }}
     {{- $selectedMirrors := include "buildkit-service.packageMirror.selectedRegistryMirrors" . | fromYamlArray }}
@@ -62,6 +66,18 @@ data:
     [worker.oci]
       {{- if hasKey . "gc" }}
       gc = {{ .gc }}
+      {{- end }}
+      {{- with .networkMode }}
+      networkMode = {{ . | quote }}
+      {{- end }}
+      {{- with .cniConfigPath }}
+      cniConfigPath = {{ . | quote }}
+      {{- end }}
+      {{- with .cniBinaryPath }}
+      cniBinaryPath = {{ . | quote }}
+      {{- end }}
+      {{- with .cniPoolSize }}
+      cniPoolSize = {{ int . }}
       {{- end }}
       {{- with .gcKeepStorageMB }}
       gckeepstorage = {{ int . }}

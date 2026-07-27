@@ -9,6 +9,9 @@
 /buildctl-daemon
 /infra/
 
+# Site-specific Helm override values (contain credentials); keep local only.
+/chart/akernel-values.yaml
+
 # Local infrastructure state and credentials must never be committed.
 **/.terraform/
 *.tfstate
