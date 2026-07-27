@@ -17,7 +17,7 @@ Prerequisites:
 - `kubectl` access that can create Jobs in the target namespace
 - Dragonfly Scheduler v2 reachable from that namespace
 - Pod egress to every registry in the image list
-- Access to the published multi-architecture preheat helper image, or a custom
+- Access to the published preheat helper image (linux/amd64), or a custom
 	image supplied with `--image`
 
 One image reference per line (multi-level repo paths and `@sha256:` digests

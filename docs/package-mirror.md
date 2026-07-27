@@ -443,9 +443,9 @@ their repositories to Helm:
 
 ```bash
 HELPER_PREFIX='registry.example.com/myorg'
-docker buildx build --platform linux/amd64,linux/arm64 --push \
+docker buildx build --platform linux/amd64 --push \
   -t "$HELPER_PREFIX/apt-cacher-ng:dev" chart/images/apt-cacher-ng
-docker buildx build --platform linux/amd64,linux/arm64 --push \
+docker buildx build --platform linux/amd64 --push \
   -t "$HELPER_PREFIX/git-cache:dev" chart/images/git-cache
 ```
 

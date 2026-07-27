@@ -72,7 +72,7 @@ your cluster can pull from, then set `SERVICE_IMAGE`:
 
 ```bash
 SERVICE_IMAGE='registry.example.com/myorg/buildctl-daemon:dev'
-docker buildx build --platform linux/amd64,linux/arm64 \
+docker buildx build --platform linux/amd64 \
   --tag "$SERVICE_IMAGE" --push .
 ```
 
