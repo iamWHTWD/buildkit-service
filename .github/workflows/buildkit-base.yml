@@ -1,7 +1,8 @@
 # Builds the BuildKit base image (with Nydus image format support) from
-# https://github.com/nydusaccelerator/buildkit and publishes it as
-# ghcr.io/<org>/buildkit. Use it as Dockerfile BASE_IMAGE or chart `image` when
-# testing a custom fork. Trigger manually when the upstream fork changes.
+# https://github.com/nydusaccelerator/buildkit, layers CNI plugins on top for
+# chart deployments using networkMode=cni, and publishes it as
+# ghcr.io/<org>/buildkit. Use it as the chart `image` (worker) or Dockerfile
+# BASE_IMAGE. Trigger manually when the upstream fork changes.
 name: BuildKit Base Image
 
 on:
@@ -24,6 +25,8 @@ jobs:
   buildkit:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
       - uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
@@ -33,13 +36,25 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push
+      - name: Build base from source
         uses: docker/build-push-action@v6
         with:
           context: "https://github.com/nydusaccelerator/buildkit.git#${{ inputs.ref }}"
           # Upstream only supports linux/amd64; keep the base image amd64-only.
           platforms: linux/amd64
           push: true
-          tags: ghcr.io/${{ github.repository_owner }}/buildkit:${{ inputs.tag }}
+          tags: ghcr.io/${{ github.repository_owner }}/buildkit:${{ inputs.tag }}-base
           cache-from: type=gha,scope=buildkit-base
           cache-to: type=gha,scope=buildkit-base,mode=max
+
+      - name: Add CNI plugins and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ./chart/images/buildkit
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            BASE_IMAGE=ghcr.io/${{ github.repository_owner }}/buildkit:${{ inputs.tag }}-base
+          tags: ghcr.io/${{ github.repository_owner }}/buildkit:${{ inputs.tag }}
+          cache-from: type=gha,scope=buildkit-cni
+          cache-to: type=gha,scope=buildkit-cni,mode=max
