@@ -61,9 +61,9 @@ buildkitdConfig:
   # Optional CNI network configuration for build containers. When set, it is
   # rendered as a cni.json key in the buildkitd ConfigMap (mounted alongside
   # buildkitd.toml at /etc/buildkit). Requires a BuildKit image with CNI
-  # plugins installed (see chart/images/buildkit and the buildkit-base.yml
-  # workflow); pair it with worker.oci networkMode/cniConfigPath/cniBinaryPath
-  # below. Example:
+  # plugins installed, for example the buildctl-daemon image built from
+  # chart/images/buildkit/Dockerfile; pair it with worker.oci networkMode/
+  # cniConfigPath/cniBinaryPath below. Example:
   # cniConfig:
   #   name: buildkit
   #   type: bridge
@@ -157,8 +157,9 @@ metricsAggregator:
 buildctlDaemon:
   enabled: true
   replicas: 1
-  # Image built from this repository. It contains both buildctl-daemon and
-  # buildctl-batch on top of the Nydus-enabled BuildKit image.
+  # Image built from chart/images/buildkit/Dockerfile. It layers
+  # buildctl-daemon, buildctl-batch and CNI plugins on top of the Nydus-enabled
+  # BuildKit image, so it can also serve as a CNI-capable worker `image`.
   image: ghcr.io/inclusionai/buildkit-service/buildctl-daemon:latest
   imagePullPolicy: IfNotPresent
   buildkitdAddr: tcp://buildkit-service.buildkit-service.svc:9094

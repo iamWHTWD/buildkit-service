@@ -1,9 +1,6 @@
 # BuildKit Service
 
-A distributed image build service on Kubernetes. It batch-builds Dockerfiles
-into OCI / [Nydus](https://github.com/dragonflyoss/nydus) images, pushes them
-to any OCI registry, and ships an in-cluster package cache
-(pip / npm / apt / yum / apk / git / container registry) that dramatically
+Distributed image build and package mirror services for agentic infrastructure.It batch-builds Dockerfiles into OCI / [Nydus](https://github.com/dragonflyoss/nydus) images, pushes them to any OCI registry, and ships an in-cluster package cache (pip / npm / apt / yum / apk / git / container registry) that dramatically
 speeds up dependency installation during builds.
 
 ## Features
@@ -73,6 +70,7 @@ your cluster can pull from, then set `SERVICE_IMAGE`:
 ```bash
 SERVICE_IMAGE='registry.example.com/myorg/buildctl-daemon:dev'
 docker buildx build --platform linux/amd64 \
+  -f chart/images/buildkit/Dockerfile \
   --tag "$SERVICE_IMAGE" --push .
 ```
 
@@ -181,7 +179,7 @@ container images.
 ```bash
 make all      # builds bin/buildctl-batch and bin/buildctl-daemon
 make test     # go test ./...
-docker build -t buildkit-service:dev .
+docker build -f chart/images/buildkit/Dockerfile -t buildkit-service:dev .
 ```
 
 Release workflows publish `buildctl-daemon`, `apt-cacher-ng`, `git-cache`, and

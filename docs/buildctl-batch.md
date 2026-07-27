@@ -301,7 +301,8 @@ Component images are published automatically by GitHub Actions (see
 `.github/workflows/release.yml`). To build manually:
 
 ```bash
-docker build -t <registry>/<org>/buildctl-daemon:<tag> .
+docker build -f chart/images/buildkit/Dockerfile \
+  -t <registry>/<org>/buildctl-daemon:<tag> .
 docker push <registry>/<org>/buildctl-daemon:<tag>
 ```
 
