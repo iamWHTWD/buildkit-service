@@ -1,7 +1,10 @@
 namespaceOverride: buildkit-service
 
-# BuildKit daemon image with Nydus image format support.
-image: ghcr.io/nydusaccelerator/buildkit:v0.31.1-nydus
+# Image built from chart/images/buildkit/Dockerfile: the upstream Nydus-enabled
+# BuildKit image plus buildctl-daemon, buildctl-batch and CNI plugins. It backs
+# both the buildkitd worker below and buildctlDaemon.image. Replace it with a
+# plain BuildKit image only if you also disable buildkitdConfig CNI settings.
+image: ghcr.io/inclusionai/buildkit-service/buildctl-daemon:latest
 
 
 imagePullSecrets:
@@ -58,6 +61,25 @@ registries:
 buildkitdConfig:
   enabled: true
   path: /etc/buildkit/buildkitd.toml
+  # CNI network configuration for build containers, rendered as a cni.json key
+  # in the buildkitd ConfigMap (mounted next to buildkitd.toml under
+  # /etc/buildkit). Build steps then run in an isolated bridge network instead
+  # of sharing the buildkitd pod network. Requires CNI plugins in the worker
+  # image (the default image ships them). Change ipam.subnet if it collides
+  # with a cluster network, or set this to {} together with the worker.oci CNI
+  # keys below to fall back to host networking.
+  cniConfig:
+    bridge: buildkit0
+    cniVersion: 0.4.0
+    forceAddress: false
+    hairpinMode: true
+    ipMasq: true
+    ipam:
+      subnet: 172.30.0.0/16
+      type: host-local
+    isDefaultGateway: true
+    name: buildkit
+    type: bridge
   # Extra manual entries. Mirrors for registries are rendered
   # automatically.
   registryMirrors: []
@@ -67,13 +89,18 @@ buildkitdConfig:
   worker:
     oci:
       gc: true
+      # CNI networking for build steps; clear these to use host networking.
+      networkMode: cni
+      cniConfigPath: /etc/buildkit/cni.json
+      cniBinaryPath: /usr/lib/cni
+      cniPoolSize: 16
       # gckeepstorage is the default BuildKit GC storage target in MB. Keep it
       # well below volumes[].lib-buildkit.emptyDir.sizeLimit so short bursts do
       # not make kubelet evict buildkitd before BuildKit GC can prune cache.
-      gcKeepStorageMB: 10240
+      gcKeepStorageMB: 409600
       gcPolicies:
         # Keep short-lived source/cache-mount/git checkout records small.
-        - keepBytes: 2147483648 # 2GiB
+        - keepBytes: 32212254720 # 30GiB
           keepDuration: 86400 # 24h
           filters:
             - type==source.local
@@ -81,7 +108,7 @@ buildkitdConfig:
             - type==source.git.checkout
         # Global cache ceiling for all records.
         - all: true
-          keepBytes: 10737418240 # 10GiB
+          keepBytes: 429496729600 # 400GiB
 
 # Cache-usage exporter sidecar for each buildkitd pod. buildkitd in this fork
 # exposes no cumulative build/cache metrics, so cache size is measured directly
@@ -133,8 +160,9 @@ metricsAggregator:
 buildctlDaemon:
   enabled: true
   replicas: 1
-  # Image built from this repository. It contains both buildctl-daemon and
-  # buildctl-batch on top of the Nydus-enabled BuildKit image.
+  # Image built from chart/images/buildkit/Dockerfile. It layers
+  # buildctl-daemon, buildctl-batch and CNI plugins on top of the Nydus-enabled
+  # BuildKit image, so it can also serve as a CNI-capable worker `image`.
   image: ghcr.io/inclusionai/buildkit-service/buildctl-daemon:latest
   imagePullPolicy: IfNotPresent
   buildkitdAddr: tcp://buildkit-service.buildkit-service.svc:9094
@@ -170,18 +198,18 @@ buildctlDaemon:
   registryTokenHosts: []
   keepTTL: 2h
   maxLogBytes: 1048576
-  maxRequestBytes: 536870912
-  maxExtractedBytes: 4294967296
-  maxArchiveFiles: 100000
-  maxRetainedTasks: 100
-  maxWorkDirBytes: 8589934592
-  uploadReadTimeout: 5m
+  maxRequestBytes: 1073741824
+  maxExtractedBytes: 8589934592
+  maxArchiveFiles: 200000
+  maxRetainedTasks: 2000
+  maxWorkDirBytes: 429496729600
+  uploadReadTimeout: 10m
   addrConcurrency: 5
   # Global cap on builds running concurrently across ALL buildkitd addresses;
   # extra tasks stay queued until a slot frees. Protects shared dependencies
   # (registry mirrors, upstream registries) from burst submissions. 0 disables
   # the global limit (per-address addrConcurrency still applies).
-  maxConcurrency: 100
+  maxConcurrency: 600
   registryCheckTimeout: 30s
   registryCheckConcurrency: 32
   # Docker config Secret used by build and HEAD image registry authentication.
@@ -244,13 +272,13 @@ buildctlDaemon:
     annotations: {}
   resources:
     limits:
-      cpu: "2"
-      memory: 4Gi
-      ephemeral-storage: 10Gi
+      cpu: "16"
+      memory: 32Gi
+      ephemeral-storage: 500Gi
     requests:
-      cpu: "100m"
-      memory: 256Mi
-      ephemeral-storage: 1Gi
+      cpu: "8"
+      memory: 16Gi
+      ephemeral-storage: 200Gi
   podSecurityContext: {}
   podAnnotations: {}
   podLabels: {}
@@ -415,15 +443,14 @@ container:
     successThreshold: 1
     timeoutSeconds: 3
 
+# buildkitd deliberately has no cpu/memory limits by default: builds are
+# bursty and the worker should use whatever the node offers. Size
+# ephemeral-storage for the BuildKit cache plus in-flight build scratch space.
 resources:
   limits:
-    cpu: "4"
-    memory: 8Gi
-    ephemeral-storage: 20Gi
+    ephemeral-storage: 1024Gi
   requests:
-    cpu: "500m"
-    memory: 1Gi
-    ephemeral-storage: 10Gi
+    ephemeral-storage: 1024Gi
 podSecurityContext: {}
 
 tolerations: []
@@ -438,7 +465,7 @@ volumes:
     emptyDir: {}
   - name: lib-buildkit
     emptyDir:
-      sizeLimit: 15Gi
+      sizeLimit: 900Gi
 
 volumeMounts:
   - name: run-buildkit
@@ -447,14 +474,18 @@ volumeMounts:
     mountPath: /var/lib/buildkit
 
 deployment:
-  replicas: 1
+  # Worker fleet size. Each replica owns a private cache volume, so scale this
+  # with build concurrency rather than expecting a shared warm cache.
+  replicas: 20
   progressDeadlineSeconds: 600
   revisionHistoryLimit: 10
+  # No surge: buildkitd pods are privileged and hold large cache volumes, so a
+  # surge pod would double per-node disk demand during rollouts.
   strategy:
     type: RollingUpdate
     rollingUpdate:
-      maxSurge: 25%
-      maxUnavailable: 25%
+      maxSurge: 0
+      maxUnavailable: 1
 
 podAnnotations: {}
 podLabels: {}
@@ -470,9 +501,12 @@ packageMirror:
   namespaceOverride: package-mirror
 
   networkPolicy:
-    enabled: true
+    # Opt-in ingress NetworkPolicy. When enabled it admits clients from the
+    # package-mirror namespace itself plus allowedNamespaces. Leave disabled
+    # until every consumer namespace is enumerated, or cross-namespace
+    # clients (for example batch build runner Pods) lose cache access.
+    enabled: false
     # BuildKit build containers originate from the build service namespace.
-    # Add namespaces here only when their Pods must call cache Services directly.
     allowedNamespaces:
       - buildkit-service
   
@@ -485,7 +519,7 @@ packageMirror:
     # Multiple replicas shard clients via Service sessionAffinity=ClientIP. Each
     # replica has its own local cache; this is intended for high-concurrency load
     # distribution rather than shared warm-cache efficiency.
-    replicaCount: 1
+    replicaCount: 20
     # Caches are per-pod emptyDir, so RollingUpdate can keep the service
     # available while Pods are replaced.
     strategy:
@@ -559,8 +593,8 @@ packageMirror:
     resources:
       limits:
         cpu: "1"
-        memory: 1Gi
-        ephemeral-storage: 2Gi
+        memory: 2Gi
+        ephemeral-storage: 30Gi
     env:
       # Upstream PyPI index. Point at a geographically close mirror if needed.
       indexUrl: https://pypi.org/simple/
@@ -570,7 +604,7 @@ packageMirror:
       # Keep cacheSize WELL below the cache-pip emptyDir sizeLimit / ephemeral
       # limit: proxpi evicts lazily and index/tmp files are not counted, so
       # cacheSize == sizeLimit risks kubelet eviction.
-      cacheSize: "1073741824"
+      cacheSize: "17179869184"
       disableIndexSslVerification: false
       downloadTimeoutSeconds: 2
       connectTimeoutSeconds: 3.1
@@ -612,7 +646,7 @@ packageMirror:
       # Compatibility setting for existing deployments. Real size-based GC is
       # controlled by npm.gc below and enforced by the cache-gc sidecar.
       cacheMaxSize: 68719476736
-      nodeOptions: --max-old-space-size=512
+      nodeOptions: --max-old-space-size=6144
     gc:
       enabled: true
       # Keep below persistence.emptyDir.npmSizeLimit / npm ephemeral-storage.
@@ -620,13 +654,13 @@ packageMirror:
       # compacts down to targetRatio * maxBytes.
       # The sidecar deletes oldest cache files once usage crosses this high-water
       # mark, then compacts down to targetRatio * maxBytes.
-      maxBytes: "1073741824"
+      maxBytes: "32212254720"
       targetRatio: "0.8"
     resources:
       limits:
-        cpu: "1"
-        memory: 1Gi
-        ephemeral-storage: 2Gi
+        cpu: "3"
+        memory: 8Gi
+        ephemeral-storage: 80Gi
     livenessProbe:
       path: /-/ping
       initialDelaySeconds: 30
@@ -658,9 +692,9 @@ packageMirror:
     protocol: TCP
     resources:
       limits:
-        cpu: "1"
-        memory: 1Gi
-        ephemeral-storage: 2Gi
+        cpu: "3"
+        memory: 4Gi
+        ephemeral-storage: 160Gi
     env:
       # Debian/Ubuntu upstream mirror used as the default remap target for apt.
       # Must serve /debian and /ubuntu paths on one host. Use HTTP upstreams so
@@ -691,7 +725,7 @@ packageMirror:
       # apt-cacher-ng has age-based expiry (ExThreshold), but not a hard disk
       # high-water guard. Keep this below its ephemeral-storage and emptyDir
       # limits.
-      maxBytes: "1073741824"
+      maxBytes: "64424509440"
       targetRatio: "0.8"
     livenessProbe:
       path: /acng-report.html
@@ -724,7 +758,7 @@ packageMirror:
     # follows this flag. Set false to revert git back into the shared pod.
     standalone: true
     # Replicas for the standalone git Deployment.
-    replicaCount: 1
+    replicaCount: 8
     # Add affinity in a production override when git cache I/O needs isolation.
     affinity: {}
     image:
@@ -740,9 +774,9 @@ packageMirror:
     protocol: TCP
     env:
       cacheTtlSeconds: 300
-      # Each concurrent git-upload-pack runs its own pack-objects. Keep the
-      # serving fan-out conservative and scale with replicas instead.
-      maxActiveRequests: 4
+      # Each concurrent git-upload-pack runs its own pack-objects. Scale this
+      # together with git.resources; overload queues via busyTimeoutSeconds.
+      maxActiveRequests: 8
       busyTimeoutSeconds: 30
       maxRequestBodyBytes: 10485760
       requestReadTimeoutSeconds: 30
@@ -758,7 +792,7 @@ packageMirror:
       # index-pack memory is not bounded by the pack.* caps; a burst of large
       # concurrent clones OOM-killed git pods (137) and blew tens of GB of tmp
       # data past the GC high-water between cycles. Requires the rebuilt image.
-      maxConcurrentClones: 1
+      maxConcurrentClones: 2
       # Per-fetch pack-objects memory caps, injected as git config into
       # git-http-backend (works with the current image too). Without these a
       # single large-repo fetch can use several GB and OOM-kill the container.
@@ -767,14 +801,14 @@ packageMirror:
       packDeltaCacheSize: 128m
       # Size-based mirror GC. Keep maxDiskBytes below the emptyDir limit so
       # in-flight clones have temporary headroom. 0 disables.
-      maxDiskBytes: "1073741824"
+      maxDiskBytes: "128849018880"
       gcIntervalSeconds: 120
       gcTargetRatio: "0.8"
     resources:
       limits:
-        cpu: "1"
-        memory: 1Gi
-        ephemeral-storage: 2Gi
+        cpu: "2"
+        memory: 16Gi
+        ephemeral-storage: 200Gi
     # Optional per-backend persistence. Prefer this over global persistence when
     # only git-cache should share a RWX cache across replicas.
     persistence:
@@ -822,7 +856,7 @@ packageMirror:
     debugPortName: debug
     debugPort: 5001
     deployment:      # Defaults to deployment.replicaCount when empty.
-      replicaCount: 1
+      replicaCount: ""
     env:
       # Expiry of pull-through cache content (Distribution v3 proxy scheduler,
       # requires storage.delete.enabled). Entries are re-scheduled on every
@@ -839,13 +873,14 @@ packageMirror:
       proxyPassword: ""
     resources:
       limits:
-        cpu: "1"
+        cpu: 500m
         memory: 1Gi
         # Only covers the container writable layer + logs when persistence is
         # enabled (the cache lives on the PVC). In the emptyDir fallback mode
-        # this MUST stay above persistence.emptyDir.registrySizeLimit, because
-        # emptyDir usage counts against the pod-level sum of container limits.
-        ephemeral-storage: 3Gi
+        # this must be at or above persistence.emptyDir.registrySizeLimit
+        # (emptyDir usage counts against the pod-level sum of container
+        # limits; the cache-metrics sidecar limit adds headroom).
+        ephemeral-storage: 10Gi
     # Per-replica persistent cache (StatefulSet volumeClaimTemplates). RWO
     # storage works without a shared-filesystem dependency because each replica
     # owns its own claim. The cache survives
@@ -951,15 +986,15 @@ packageMirror:
     annotations: {}
     emptyDir:
       sizeLimit: ""
-      pipSizeLimit: 2Gi
-      npmSizeLimit: 2Gi
-      aptYumSizeLimit: 2Gi
+      pipSizeLimit: 30Gi
+      npmSizeLimit: 80Gi
+      aptYumSizeLimit: 160Gi
       # Keep aligned with git.resources.limits.ephemeral-storage and leave burst
       # headroom for temporary clone data between GC cycles.
-      gitSizeLimit: 2Gi
+      gitSizeLimit: 200Gi
       # Fallback only: used when registry.persistence is disabled and the
       # mirror cache sits on a node-local emptyDir.
-      registrySizeLimit: 2Gi
+      registrySizeLimit: 10Gi
   
   ingress:
     enabled: false

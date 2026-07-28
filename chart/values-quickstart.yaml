@@ -17,6 +17,7 @@ buildkitdConfig:
           keepBytes: 10737418240
 
 buildctlDaemon:
+  maxConcurrency: 100
   maxRequestBytes: 67108864
   maxExtractedBytes: 536870912
   maxArchiveFiles: 10000
@@ -83,6 +84,7 @@ packageMirror:
   npm:
     env:
       nodeOptions: --max-old-space-size=512
+      cacheMaxSize: 1073741824
     gc:
       maxBytes: "1073741824"
     resources:
@@ -102,6 +104,8 @@ packageMirror:
     replicaCount: 1
     affinity: null
     env:
+      maxActiveRequests: 4
+      maxConcurrentClones: 1
       maxDiskBytes: "1073741824"
     resources:
       limits:
@@ -118,6 +122,13 @@ packageMirror:
         ephemeral-storage: 3Gi
     persistence:
       enabled: false
+  persistence:
+    emptyDir:
+      pipSizeLimit: 2Gi
+      npmSizeLimit: 2Gi
+      aptYumSizeLimit: 2Gi
+      gitSizeLimit: 2Gi
+      registrySizeLimit: 2Gi
   persistence:
     emptyDir:
       pipSizeLimit: 2Gi

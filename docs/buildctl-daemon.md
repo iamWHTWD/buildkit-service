@@ -674,21 +674,22 @@ Never expose pprof through the public LoadBalancer Service.
 
 ### 4. High-concurrency configuration
 
-The chart defaults to 5 concurrent solves per buildkitd address and 100 running
+The chart defaults to 5 concurrent solves per buildkitd address and 600 running
 builds globally (the standalone CLI default for `--max-concurrency` is 0,
-meaning disabled):
+meaning disabled). The quickstart profile tightens these limits for small
+clusters:
 
 ```yaml
 buildctlDaemon:
   replicas: 1
   addrConcurrency: 5
-  maxConcurrency: 100
-  maxRequestBytes: 536870912
-  maxExtractedBytes: 4294967296
-  maxArchiveFiles: 100000
-  maxRetainedTasks: 100
-  maxWorkDirBytes: 8589934592
-  uploadReadTimeout: 5m
+  maxConcurrency: 600
+  maxRequestBytes: 1073741824
+  maxExtractedBytes: 8589934592
+  maxArchiveFiles: 200000
+  maxRetainedTasks: 2000
+  maxWorkDirBytes: 429496729600
+  uploadReadTimeout: 10m
   rlimitNoFile: 1048576
   resources:
     requests:
@@ -725,9 +726,9 @@ buildctlDaemon:
 ```
 
 Within one mode, tasks are scheduled in enqueue order; modes use independent
-worker pools. The example should also set `maxConcurrency: 600`. When
-`maxConcurrency > 0`, it must be at least the sum of all mode `concurrency`
-values, or the daemon refuses to start. Tasks share the underlying BuildKit
+worker pools. When `maxConcurrency > 0`, it must be at least the sum of all
+mode `concurrency` values (600 in this example, matching the chart default),
+or the daemon refuses to start. Tasks share the underlying BuildKit
 address pool, so `addrConcurrency × number of buildkitd addresses` must leave
 enough physical slots for each mode.
 

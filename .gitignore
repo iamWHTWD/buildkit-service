@@ -9,6 +9,9 @@
 /buildctl-daemon
 /infra/
 
+# Production-specific Helm override values, keep local only.
+/chart/values-prod.yaml
+
 # Local infrastructure state and credentials must never be committed.
 **/.terraform/
 *.tfstate
