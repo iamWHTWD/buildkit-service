@@ -1,7 +1,10 @@
 namespaceOverride: buildkit-service
 
-# BuildKit daemon image with Nydus image format support.
-image: ghcr.io/nydusaccelerator/buildkit:v0.31.1-nydus
+# Image built from chart/images/buildkit/Dockerfile: the upstream Nydus-enabled
+# BuildKit image plus buildctl-daemon, buildctl-batch and CNI plugins. It backs
+# both the buildkitd worker below and buildctlDaemon.image. Replace it with a
+# plain BuildKit image only if you also disable buildkitdConfig CNI settings.
+image: ghcr.io/inclusionai/buildkit-service/buildctl-daemon:latest
 
 
 imagePullSecrets:
@@ -58,25 +61,25 @@ registries:
 buildkitdConfig:
   enabled: true
   path: /etc/buildkit/buildkitd.toml
-  # Optional CNI network configuration for build containers. When set, it is
-  # rendered as a cni.json key in the buildkitd ConfigMap (mounted alongside
-  # buildkitd.toml at /etc/buildkit). Requires a BuildKit image with CNI
-  # plugins installed, for example the buildctl-daemon image built from
-  # chart/images/buildkit/Dockerfile; pair it with worker.oci networkMode/
-  # cniConfigPath/cniBinaryPath below. Example:
-  # cniConfig:
-  #   name: buildkit
-  #   type: bridge
-  #   bridge: buildkit0
-  #   cniVersion: 0.4.0
-  #   isDefaultGateway: true
-  #   ipMasq: true
-  #   hairpinMode: true
-  #   forceAddress: false
-  #   ipam:
-  #     type: host-local
-  #     subnet: 172.30.0.0/16
-  cniConfig: {}
+  # CNI network configuration for build containers, rendered as a cni.json key
+  # in the buildkitd ConfigMap (mounted next to buildkitd.toml under
+  # /etc/buildkit). Build steps then run in an isolated bridge network instead
+  # of sharing the buildkitd pod network. Requires CNI plugins in the worker
+  # image (the default image ships them). Change ipam.subnet if it collides
+  # with a cluster network, or set this to {} together with the worker.oci CNI
+  # keys below to fall back to host networking.
+  cniConfig:
+    bridge: buildkit0
+    cniVersion: 0.4.0
+    forceAddress: false
+    hairpinMode: true
+    ipMasq: true
+    ipam:
+      subnet: 172.30.0.0/16
+      type: host-local
+    isDefaultGateway: true
+    name: buildkit
+    type: bridge
   # Extra manual entries. Mirrors for registries are rendered
   # automatically.
   registryMirrors: []
@@ -86,11 +89,11 @@ buildkitdConfig:
   worker:
     oci:
       gc: true
-      # Optional CNI networking (requires a CNI-capable BuildKit build):
-      # networkMode: cni
-      # cniConfigPath: /etc/buildkit/cni.json
-      # cniBinaryPath: /usr/lib/cni
-      # cniPoolSize: 16
+      # CNI networking for build steps; clear these to use host networking.
+      networkMode: cni
+      cniConfigPath: /etc/buildkit/cni.json
+      cniBinaryPath: /usr/lib/cni
+      cniPoolSize: 16
       # gckeepstorage is the default BuildKit GC storage target in MB. Keep it
       # well below volumes[].lib-buildkit.emptyDir.sizeLimit so short bursts do
       # not make kubelet evict buildkitd before BuildKit GC can prune cache.
@@ -471,7 +474,9 @@ volumeMounts:
     mountPath: /var/lib/buildkit
 
 deployment:
-  replicas: 1
+  # Worker fleet size. Each replica owns a private cache volume, so scale this
+  # with build concurrency rather than expecting a shared warm cache.
+  replicas: 20
   progressDeadlineSeconds: 600
   revisionHistoryLimit: 10
   # No surge: buildkitd pods are privileged and hold large cache volumes, so a
@@ -514,7 +519,7 @@ packageMirror:
     # Multiple replicas shard clients via Service sessionAffinity=ClientIP. Each
     # replica has its own local cache; this is intended for high-concurrency load
     # distribution rather than shared warm-cache efficiency.
-    replicaCount: 1
+    replicaCount: 20
     # Caches are per-pod emptyDir, so RollingUpdate can keep the service
     # available while Pods are replaced.
     strategy:
@@ -753,7 +758,7 @@ packageMirror:
     # follows this flag. Set false to revert git back into the shared pod.
     standalone: true
     # Replicas for the standalone git Deployment.
-    replicaCount: 1
+    replicaCount: 8
     # Add affinity in a production override when git cache I/O needs isolation.
     affinity: {}
     image:
@@ -851,7 +856,7 @@ packageMirror:
     debugPortName: debug
     debugPort: 5001
     deployment:      # Defaults to deployment.replicaCount when empty.
-      replicaCount: 1
+      replicaCount: ""
     env:
       # Expiry of pull-through cache content (Distribution v3 proxy scheduler,
       # requires storage.delete.enabled). Entries are re-scheduled on every
