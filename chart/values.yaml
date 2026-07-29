@@ -481,11 +481,14 @@ deployment:
   revisionHistoryLimit: 10
   # No surge: buildkitd pods are privileged and hold large cache volumes, so a
   # surge pod would double per-node disk demand during rollouts.
+  # maxUnavailable must stay above the number of replicas that are expected to
+  # be permanently unschedulable (for example when the fleet is intentionally
+  # sized slightly above node capacity), otherwise a rollout deadlocks.
   strategy:
     type: RollingUpdate
     rollingUpdate:
       maxSurge: 0
-      maxUnavailable: 1
+      maxUnavailable: 3
 
 podAnnotations: {}
 podLabels: {}
