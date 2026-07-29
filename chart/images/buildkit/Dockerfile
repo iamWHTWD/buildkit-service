@@ -37,11 +37,14 @@ RUN mkdir -p /out \
        | tar -xz -C /out
 
 FROM ${BASE_IMAGE}
+# iptables/ip6tables are required by the CNI bridge and portmap plugins; without
+# them buildkitd aborts at startup with
+# `plugin type="bridge" failed (add): failed to locate iptables`.
 RUN if command -v apk >/dev/null 2>&1; then \
-        apk add --no-cache curl; \
+        apk add --no-cache curl iptables ip6tables; \
     elif command -v apt-get >/dev/null 2>&1; then \
         apt-get update && \
-        apt-get install -y --no-install-recommends ca-certificates curl && \
+        apt-get install -y --no-install-recommends ca-certificates curl iptables && \
         rm -rf /var/lib/apt/lists/*; \
     else \
         echo "BASE_IMAGE must provide apk or apt-get so curl can be installed" >&2; \
