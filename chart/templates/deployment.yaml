@@ -118,6 +118,14 @@ spec:
               mountPath: {{ .Values.buildkitdConfig.path | quote }}
               subPath: buildkitd.toml
               readOnly: true
+            {{- with .Values.buildkitdConfig.worker.oci.cniConfigPath }}
+            {{- if $.Values.buildkitdConfig.cniConfig }}
+            - name: buildkitd-config
+              mountPath: {{ . | quote }}
+              subPath: cni.json
+              readOnly: true
+            {{- end }}
+            {{- end }}
             {{- end }}
         {{- if .Values.buildkitdCacheMetrics.enabled }}
         # Cache-usage exporter: reports buildkitd cache used/total bytes from the
