@@ -12,7 +12,7 @@
 #
 # Override BASE_IMAGE to layer on a different BuildKit image:
 #   docker buildx build --build-arg BASE_IMAGE=moby/buildkit:latest ...
-ARG BASE_IMAGE=ghcr.io/nydusaccelerator/buildkit:v0.31.1-nydus
+ARG BASE_IMAGE=ghcr.io/nydusaccelerator/buildkit:v0.31.1-nydus.1
 
 FROM golang:1.23 AS builder
 WORKDIR /src
