@@ -1,0 +1,70 @@
+{{- $autoscaling := .Values.packageMirror.autoscaling | default dict -}}
+{{- if and .Values.packageMirror.enabled (get $autoscaling "enabled") }}
+{{- $minReplicas := int (get $autoscaling "minReplicas") -}}
+{{- $maxReplicas := int (get $autoscaling "maxReplicas") -}}
+{{- if lt $minReplicas 1 -}}
+{{- fail "packageMirror.autoscaling.minReplicas must be at least 1" -}}
+{{- end -}}
+{{- if gt $minReplicas $maxReplicas -}}
+{{- fail "packageMirror.autoscaling.minReplicas must not exceed maxReplicas" -}}
+{{- end -}}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "buildkit-service.packageMirror.fullname" . }}
+  namespace: {{ include "buildkit-service.packageMirror.namespace" . }}
+  labels:
+    {{- include "buildkit-service.packageMirror.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "buildkit-service.packageMirror.fullname" . }}
+  minReplicas: {{ $minReplicas }}
+  maxReplicas: {{ $maxReplicas }}
+  behavior:
+    {{- toYaml (get $autoscaling "behavior") | nindent 4 }}
+  metrics:
+    - type: ContainerResource
+      containerResource:
+        name: cpu
+        container: pip
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.packageMirror.autoscaling.metrics.pip.cpu.averageUtilization }}
+    - type: ContainerResource
+      containerResource:
+        name: memory
+        container: pip
+        target:
+          type: AverageValue
+          averageValue: {{ .Values.packageMirror.autoscaling.metrics.pip.memory.averageValue }}
+    - type: ContainerResource
+      containerResource:
+        name: cpu
+        container: npm
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.packageMirror.autoscaling.metrics.npm.cpu.averageUtilization }}
+    - type: ContainerResource
+      containerResource:
+        name: memory
+        container: npm
+        target:
+          type: AverageValue
+          averageValue: {{ .Values.packageMirror.autoscaling.metrics.npm.memory.averageValue }}
+    - type: ContainerResource
+      containerResource:
+        name: cpu
+        container: apt-yum
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.packageMirror.autoscaling.metrics.aptYum.cpu.averageUtilization }}
+    - type: ContainerResource
+      containerResource:
+        name: memory
+        container: apt-yum
+        target:
+          type: AverageValue
+          averageValue: {{ .Values.packageMirror.autoscaling.metrics.aptYum.memory.averageValue }}
+{{- end }}

@@ -37,6 +37,8 @@ jobs:
         run: helm lint chart/ --values chart/values-quickstart.yaml --set buildctlDaemon.auth.token=ci-lint-placeholder
       - name: Render quickstart profile
         run: helm template chart/ --values chart/values-quickstart.yaml --set buildctlDaemon.auth.token=ci-lint-placeholder > /dev/null
+      - name: Test package-mirror autoscaling rendering
+        run: bash chart/test-package-mirror-autoscaling-render.sh
 
   scripts-and-docs:
     runs-on: ubuntu-latest
@@ -45,7 +47,7 @@ jobs:
       - uses: azure/setup-helm@v4
       - name: Check shell and Python syntax
         run: |
-          bash -n scripts/buildctl-batch.sh scripts/preheat.sh cmd/buildctl-daemon/test/integration.sh chart/images/apt-cacher-ng/entrypoint.sh
+          bash -n scripts/buildctl-batch.sh scripts/preheat.sh cmd/buildctl-daemon/test/integration.sh chart/images/apt-cacher-ng/entrypoint.sh chart/test-package-mirror-autoscaling-render.sh
           python3 -m py_compile chart/images/git-cache/git-cache-server.py
       - name: Parse generated and embedded YAML
         run: |

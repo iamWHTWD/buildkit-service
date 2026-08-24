@@ -530,6 +530,62 @@ packageMirror:
       rollingUpdate:
         maxUnavailable: 25%
         maxSurge: 25%
+    # Annotations applied only to the main pip/npm/apt-yum Deployment. Keep
+    # node-autoscaler hints here so standalone git and registry Pods are not
+    # changed with the main workload.
+    podAnnotations:
+      cluster-autoscaler.kubernetes.io/safe-to-evict: "true"
+    # Main-Deployment-only scheduling overrides. When empty, the legacy
+    # packageMirror.nodeSelector/tolerations values below remain the fallback.
+    # Use these fields to target an autoscaled node pool without moving the
+    # standalone git or registry workloads.
+    nodeSelector: {}
+    tolerations: []
+
+  # Horizontal scaling is intentionally limited to the main package-mirror
+  # Deployment. Standalone git and registry mirrors keep their own replica and
+  # storage lifecycle because they are disk/cache constrained workloads.
+  autoscaling:
+    enabled: false
+    minReplicas: 20
+    maxReplicas: 40
+    behavior:
+      scaleUp:
+        stabilizationWindowSeconds: 0
+        selectPolicy: Max
+        policies:
+          - type: Percent
+            value: 100
+            periodSeconds: 60
+          - type: Pods
+            value: 4
+            periodSeconds: 60
+      scaleDown:
+        stabilizationWindowSeconds: 1800
+        selectPolicy: Max
+        policies:
+          - type: Percent
+            value: 25
+            periodSeconds: 300
+    # HPA selects the largest replica recommendation across these six
+    # per-container metrics. Memory uses an absolute working-set target so one
+    # memory-heavy backend cannot be hidden by low usage in another container.
+    metrics:
+      pip:
+        cpu:
+          averageUtilization: 65
+        memory:
+          averageValue: 1536Mi
+      npm:
+        cpu:
+          averageUtilization: 65
+        memory:
+          averageValue: 6Gi
+      aptYum:
+        cpu:
+          averageUtilization: 65
+        memory:
+          averageValue: 3Gi
 
   podDisruptionBudget:
     enabled: false
@@ -545,10 +601,10 @@ packageMirror:
   # not set. For production sizing, prefer pip.resources / npm.resources /
   # aptYum.resources below.
   resources:
-    # requests:
-    #   cpu: "4"
-    #   memory: 4Gi
-    #   ephemeral-storage: 500Gi
+    requests:
+      cpu: "2"
+      memory: 3Gi
+      ephemeral-storage: 40Gi
     limits:
       cpu: "2"
       memory: 3Gi
@@ -576,6 +632,10 @@ packageMirror:
     # if you ever scale up it keeps a client's requests cache-coherent so apt/yum
     # downloads don't fail with "File has unexpected size / Mirror sync in progress".
     sessionAffinity: ClientIP
+    # Applied only to the main pip/npm/apt-yum/apk Services. A bounded affinity
+    # window keeps caches warm without pinning clients to a removed Pod for the
+    # Kubernetes default three-hour timeout.
+    sessionAffinityTimeoutSeconds: 900
   
   # pip cache, served by proxpi.
   pip:
@@ -594,6 +654,10 @@ packageMirror:
       timeoutSeconds: 120
       gracefulTimeoutSeconds: 30
     resources:
+      requests:
+        cpu: "1"
+        memory: 2Gi
+        ephemeral-storage: 30Gi
       limits:
         cpu: "1"
         memory: 2Gi
@@ -626,6 +690,14 @@ packageMirror:
       periodSeconds: 10
       timeoutSeconds: 5
       failureThreshold: 3
+      successThreshold: 1
+    startupProbe:
+      enabled: true
+      path: /health
+      initialDelaySeconds: 0
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 30
       successThreshold: 1
   
   # npm cache, served by verdaccio acting as a transparent proxy to the upstream registry.
@@ -660,6 +732,10 @@ packageMirror:
       maxBytes: "32212254720"
       targetRatio: "0.8"
     resources:
+      requests:
+        cpu: "3"
+        memory: 8Gi
+        ephemeral-storage: 80Gi
       limits:
         cpu: "3"
         memory: 8Gi
@@ -678,6 +754,14 @@ packageMirror:
       timeoutSeconds: 5
       failureThreshold: 3
       successThreshold: 1
+    startupProbe:
+      enabled: true
+      path: /-/ping
+      initialDelaySeconds: 0
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 30
+      successThreshold: 1
   
   # apt + yum + apk cache, all served by a single apt-cacher-ng instance on one port.
   aptYum:
@@ -694,6 +778,10 @@ packageMirror:
     port: 3142
     protocol: TCP
     resources:
+      requests:
+        cpu: "3"
+        memory: 4Gi
+        ephemeral-storage: 160Gi
       limits:
         cpu: "3"
         memory: 4Gi
@@ -743,6 +831,14 @@ packageMirror:
       periodSeconds: 10
       timeoutSeconds: 5
       failureThreshold: 3
+      successThreshold: 1
+    startupProbe:
+      enabled: true
+      path: /acng-report.html
+      initialDelaySeconds: 0
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 30
       successThreshold: 1
   
   # apk (Alpine) cache. Served by the same apt-cacher-ng container as apt/yum;
@@ -948,6 +1044,10 @@ packageMirror:
     minAgeSeconds: 300
     excludeRegex: '(^|/)(htpasswd|apt-cacher\.log)$|(^|/)uploads($|/)'
     resources:
+      requests:
+        cpu: "100m"
+        memory: 128Mi
+        ephemeral-storage: 1Gi
       limits:
         cpu: "100m"
         memory: 128Mi
@@ -970,6 +1070,10 @@ packageMirror:
     dirStatsTtlSeconds: 60
     # The exporter is lightweight (stdlib-only); keep it small.
     resources:
+      requests:
+        cpu: "250m"
+        memory: 256Mi
+        ephemeral-storage: 1Gi
       limits:
         cpu: "250m"
         memory: 256Mi

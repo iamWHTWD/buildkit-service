@@ -16,6 +16,11 @@ spec:
   {{- with $.Values.packageMirror.service.sessionAffinity }}
   sessionAffinity: {{ . }}
   {{- end }}
+  {{- if eq $.Values.packageMirror.service.sessionAffinity "ClientIP" }}
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: {{ $.Values.packageMirror.service.sessionAffinityTimeoutSeconds }}
+  {{- end }}
   ports:
     - name: http
       port: {{ $.Values.packageMirror.service.port }}
