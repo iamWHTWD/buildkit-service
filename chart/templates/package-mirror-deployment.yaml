@@ -1,6 +1,7 @@
 {{- if .Values.packageMirror.enabled }}
 {{- $cacheSize := toString .Values.packageMirror.pip.env.cacheSize -}}
 {{- $topologySpread := .Values.packageMirror.topologySpread | default dict -}}
+{{- $podAnnotations := mergeOverwrite (deepCopy (.Values.packageMirror.podAnnotations | default dict)) (.Values.packageMirror.deployment.podAnnotations | default dict) -}}
 {{- if not (regexMatch "^[0-9]+$" $cacheSize) -}}
 {{- fail "Values.pip.env.cacheSize must be an integer number of bytes, for example 53687091200" -}}
 {{- end }}
@@ -19,7 +20,9 @@ metadata:
   labels:
     {{- include "buildkit-service.packageMirror.labels" . | nindent 4 }}
 spec:
+  {{- if not .Values.packageMirror.autoscaling.enabled }}
   replicas: {{ .Values.packageMirror.deployment.replicaCount }}
+  {{- end }}
   strategy:
     {{- toYaml .Values.packageMirror.deployment.strategy | nindent 4 }}
   selector:
@@ -34,7 +37,7 @@ spec:
         {{- end }}
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/package-mirror-configmap.yaml") . | sha256sum }}
-        {{- with .Values.packageMirror.podAnnotations }}
+        {{- with $podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
     spec:
@@ -124,6 +127,17 @@ spec:
             timeoutSeconds: {{ .Values.packageMirror.pip.readinessProbe.timeoutSeconds }}
             failureThreshold: {{ .Values.packageMirror.pip.readinessProbe.failureThreshold }}
             successThreshold: {{ .Values.packageMirror.pip.readinessProbe.successThreshold }}
+          {{- if .Values.packageMirror.pip.startupProbe.enabled }}
+          startupProbe:
+            httpGet:
+              path: {{ .Values.packageMirror.pip.startupProbe.path }}
+              port: {{ .Values.packageMirror.pip.portName }}
+            initialDelaySeconds: {{ .Values.packageMirror.pip.startupProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.packageMirror.pip.startupProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.packageMirror.pip.startupProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.packageMirror.pip.startupProbe.failureThreshold }}
+            successThreshold: {{ .Values.packageMirror.pip.startupProbe.successThreshold }}
+          {{- end }}
           resources:
             {{- toYaml (default .Values.packageMirror.resources .Values.packageMirror.pip.resources) | nindent 12 }}
           volumeMounts:
@@ -168,6 +182,17 @@ spec:
             timeoutSeconds: {{ .Values.packageMirror.npm.readinessProbe.timeoutSeconds }}
             failureThreshold: {{ .Values.packageMirror.npm.readinessProbe.failureThreshold }}
             successThreshold: {{ .Values.packageMirror.npm.readinessProbe.successThreshold }}
+          {{- if .Values.packageMirror.npm.startupProbe.enabled }}
+          startupProbe:
+            httpGet:
+              path: {{ .Values.packageMirror.npm.startupProbe.path }}
+              port: {{ .Values.packageMirror.npm.portName }}
+            initialDelaySeconds: {{ .Values.packageMirror.npm.startupProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.packageMirror.npm.startupProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.packageMirror.npm.startupProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.packageMirror.npm.startupProbe.failureThreshold }}
+            successThreshold: {{ .Values.packageMirror.npm.startupProbe.successThreshold }}
+          {{- end }}
           resources:
             {{- toYaml (default .Values.packageMirror.resources .Values.packageMirror.npm.resources) | nindent 12 }}
           volumeMounts:
@@ -213,6 +238,17 @@ spec:
             timeoutSeconds: {{ .Values.packageMirror.aptYum.readinessProbe.timeoutSeconds }}
             failureThreshold: {{ .Values.packageMirror.aptYum.readinessProbe.failureThreshold }}
             successThreshold: {{ .Values.packageMirror.aptYum.readinessProbe.successThreshold }}
+          {{- if .Values.packageMirror.aptYum.startupProbe.enabled }}
+          startupProbe:
+            httpGet:
+              path: {{ .Values.packageMirror.aptYum.startupProbe.path }}
+              port: {{ .Values.packageMirror.aptYum.portName }}
+            initialDelaySeconds: {{ .Values.packageMirror.aptYum.startupProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.packageMirror.aptYum.startupProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.packageMirror.aptYum.startupProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.packageMirror.aptYum.startupProbe.failureThreshold }}
+            successThreshold: {{ .Values.packageMirror.aptYum.startupProbe.successThreshold }}
+          {{- end }}
           resources:
             {{- toYaml (default .Values.packageMirror.resources .Values.packageMirror.aptYum.resources) | nindent 12 }}
           volumeMounts:
@@ -360,7 +396,7 @@ spec:
               mountPath: /etc/package-mirror/cache-gc.py
               subPath: cache-gc.py
         {{- end }}
-      {{- with .Values.packageMirror.nodeSelector }}
+      {{- with (default .Values.packageMirror.nodeSelector .Values.packageMirror.deployment.nodeSelector) }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
@@ -377,7 +413,7 @@ spec:
             matchLabels:
               {{- include "buildkit-service.packageMirror.selectorLabels" . | nindent 14 }}
       {{- end }}
-      {{- with .Values.packageMirror.tolerations }}
+      {{- with (default .Values.packageMirror.tolerations .Values.packageMirror.deployment.tolerations) }}
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}

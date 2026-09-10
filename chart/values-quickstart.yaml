@@ -77,6 +77,10 @@ packageMirror:
     env:
       cacheSize: "1073741824"
     resources:
+      requests:
+        cpu: "1"
+        memory: 1Gi
+        ephemeral-storage: 2Gi
       limits:
         cpu: "1"
         memory: 1Gi
@@ -88,6 +92,10 @@ packageMirror:
     gc:
       maxBytes: "1073741824"
     resources:
+      requests:
+        cpu: "1"
+        memory: 1Gi
+        ephemeral-storage: 2Gi
       limits:
         cpu: "1"
         memory: 1Gi
@@ -96,6 +104,10 @@ packageMirror:
     gc:
       maxBytes: "1073741824"
     resources:
+      requests:
+        cpu: "1"
+        memory: 1Gi
+        ephemeral-storage: 2Gi
       limits:
         cpu: "1"
         memory: 1Gi

@@ -470,10 +470,94 @@ helm upgrade --install package-mirror ./chart \
   --set packageMirror.namespaceOverride=package-mirror
 ```
 
-Both the chart defaults and quickstart values use one replica per backend,
+The chart defaults use 20 main replicas, while the quickstart profile overrides
+the main, git, and registry workloads to one replica each. Both profiles use
 node-local `emptyDir` caches, no dedicated-node affinity, and no PVC. The
-quickstart profile additionally tightens cache and API limits. Add replicas,
-node-pool scheduling, and persistence explicitly for production.
+quickstart profile additionally tightens cache and API limits. Configure
+autoscaling, node-pool scheduling, and persistence explicitly for production.
+
+### Main Deployment autoscaling and repair
+
+Autoscaling is available only for the main `package-mirror` Deployment, which
+contains the pip, npm, and apt-yum/apk backends plus their metrics and cache-GC
+sidecars. It does not target the standalone git Deployment or any registry
+StatefulSet, so their replica counts and storage lifecycle remain unchanged.
+The HPA is disabled by default and can be enabled in a production values file:
+
+```yaml
+packageMirror:
+  autoscaling:
+    enabled: true
+    minReplicas: 20
+    maxReplicas: 40
+```
+
+The default HPA uses `autoscaling/v2` container resource metrics. Kubernetes
+calculates all six recommendations and uses the largest desired replica count:
+
+| Container | CPU target | Memory target | Request / limit |
+|-----------|------------|---------------|-----------------|
+| pip | 65% of request | `1536Mi` | `1 CPU` / `2Gi` |
+| npm | 65% of request | `6Gi` | `3 CPU` / `8Gi` |
+| apt-yum | 65% of request | `3Gi` | `3 CPU` / `4Gi` |
+
+Memory uses absolute `AverageValue` targets so pressure in one backend is not
+diluted by the other containers. The targets are 75% of their memory limits,
+leaving headroom before OOM. Scale-up can add the larger of 100% or four Pods
+per minute. Scale-down waits for a 30-minute stable window and then removes at
+most 25% every five minutes, limiting cold-cache churn. The cluster must expose
+CPU and memory through the Resource Metrics API (normally Metrics Server or the
+managed-cluster equivalent); otherwise the HPA reports unknown metrics and does
+not scale.
+
+All backend `resources.requests`, `resources.limits`, and
+`autoscaling.metrics.<backend>` values are configurable in an environment
+values file. HPA memory targets are independent Kubernetes quantities rather
+than a calculated percentage: when changing a backend memory limit, update its
+`averageValue` at the same time and normally keep it around 70–75% of the new
+limit.
+
+The main Pod has explicit requests equal to limits for pip, npm, apt-yum,
+metrics, and cache-GC. Its default scheduling footprint is approximately
+`7.35 CPU`, `14.375Gi` memory, and `272Gi` ephemeral storage per Pod. This gives
+the scheduler, HPA, and node autoscaler one consistent capacity model and makes
+the default main Pod `Guaranteed` QoS. Quickstart overrides the three backend
+requests and limits together to keep its smaller profile valid.
+
+Self-repair remains Kubernetes-native: readiness removes an unhealthy backend
+Pod from all four main Services, liveness restarts a stuck container, and the
+Deployment replaces a failed Pod. Startup probes on pip, npm, and apt-yum allow
+up to five minutes for cache checks or initialization before liveness begins;
+this prevents slow startup from entering a restart loop. OOM-killed containers
+are restarted by kubelet, while the memory HPA is intended to add capacity
+before the limit is reached. Enable the existing PDB and topology spread
+settings separately when the cluster has enough failure-domain capacity.
+
+Node autoscaling is configured on the cluster or cloud node pool, not by this
+chart. The Pod-side inputs are included: concrete resource requests and the
+main-only `cluster-autoscaler.kubernetes.io/safe-to-evict: "true"` annotation.
+If the main workload uses a dedicated autoscaled pool, select and tolerate it
+without moving git or registry Pods:
+
+```yaml
+packageMirror:
+  deployment:
+    nodeSelector:
+      workload: package-mirror
+    tolerations:
+      - key: workload
+        operator: Equal
+        value: package-mirror
+        effect: NoSchedule
+```
+
+The HPA creates additional Pods; Pending Pods with satisfiable scheduling
+constraints are then the signal for the cluster autoscaler to add nodes. The
+node pool must have enough CPU, memory, and especially local ephemeral storage
+for the per-Pod footprint, its labels and taints must match the values above,
+and its configured maximum must accommodate 40 main Pods. The four main
+Services retain `ClientIP` affinity with a 900-second timeout to improve cache
+locality while allowing clients to move away from replaced or scaled-down Pods.
 
 `packageMirror.pip.env.cacheSize` must be an integer byte count (no `1GiB`
 strings). The default `17179869184` is 16 GiB; keep it well below the
