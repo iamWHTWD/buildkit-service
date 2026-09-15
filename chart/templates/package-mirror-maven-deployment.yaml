@@ -1,0 +1,94 @@
+{{- if and .Values.packageMirror.enabled .Values.packageMirror.maven.enabled }}
+{{- $topologySpread := .Values.packageMirror.topologySpread | default dict -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "buildkit-service.packageMirror.mavenFullname" . }}
+  namespace: {{ include "buildkit-service.packageMirror.namespace" . }}
+  labels:
+    {{- include "buildkit-service.packageMirror.labels" . | nindent 4 }}
+    app.kubernetes.io/component: maven
+spec:
+  replicas: {{ .Values.packageMirror.maven.replicaCount | default .Values.packageMirror.deployment.replicaCount }}
+  strategy:
+    {{- toYaml .Values.packageMirror.deployment.strategy | nindent 4 }}
+  selector:
+    matchLabels:
+      {{- include "buildkit-service.packageMirror.mavenSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "buildkit-service.packageMirror.mavenSelectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: maven
+        {{- with .Values.packageMirror.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.packageMirror.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.packageMirror.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.packageMirror.podSecurityContext | nindent 8 }}
+      containers:
+        {{- include "buildkit-service.packageMirror.mavenContainer" . | nindent 8 }}
+        {{- if .Values.packageMirror.maven.cacheMetrics.enabled }}
+        {{- include "buildkit-service.dirSizeExporterContainer" (dict
+              "root" .
+              "config" .Values.packageMirror.maven.cacheMetrics
+              "prefix" "package_mirror"
+              "targets" (printf "maven=%s" "/app/data")
+              "mountName" (include "buildkit-service.packageMirror.mavenDataVolumeName" .)
+              "mountPath" "/app/data"
+              "protocol" .Values.packageMirror.maven.protocol) | nindent 8 }}
+        {{- end }}
+      {{- with (default .Values.packageMirror.nodeSelector .Values.packageMirror.maven.nodeSelector) }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with (default .Values.packageMirror.affinity .Values.packageMirror.maven.affinity) }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if (get $topologySpread "enabled") }}
+      topologySpreadConstraints:
+        - maxSkew: {{ get $topologySpread "maxSkew" | default 1 }}
+          topologyKey: {{ get $topologySpread "topologyKey" | default "kubernetes.io/hostname" | quote }}
+          whenUnsatisfiable: {{ get $topologySpread "whenUnsatisfiable" | default "ScheduleAnyway" }}
+          labelSelector:
+            matchLabels:
+              {{- include "buildkit-service.packageMirror.mavenSelectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: maven
+      {{- end }}
+      {{- with (default .Values.packageMirror.tolerations .Values.packageMirror.maven.tolerations) }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      volumes:
+        - name: {{ include "buildkit-service.packageMirror.mavenConfigVolumeName" . }}
+          configMap:
+            name: {{ include "buildkit-service.packageMirror.mavenFullname" . }}
+        {{- if .Values.packageMirror.maven.cacheMetrics.enabled }}
+        # The maven ConfigMap only holds the shared configuration file; the
+        # exporter script is shared with the other backends from the main
+        # package-mirror ConfigMap.
+        - name: {{ include "buildkit-service.packageMirror.configVolumeName" . }}
+          configMap:
+            name: {{ include "buildkit-service.packageMirror.fullname" . }}
+        {{- end }}
+        {{- if .Values.packageMirror.maven.persistence.enabled }}
+        - name: {{ include "buildkit-service.packageMirror.mavenDataVolumeName" . }}
+          persistentVolumeClaim:
+            claimName: {{ default (include "buildkit-service.packageMirror.mavenFullname" .) .Values.packageMirror.maven.persistence.existingClaim }}
+        {{- else }}
+        - name: {{ include "buildkit-service.packageMirror.mavenDataVolumeName" . }}
+          emptyDir:
+            {{- with .Values.packageMirror.persistence.emptyDir.mavenSizeLimit }}
+            sizeLimit: {{ . }}
+            {{- end }}
+        {{- end }}
+{{- end }}
