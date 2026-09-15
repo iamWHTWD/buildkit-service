@@ -343,6 +343,35 @@ limit for each other. Retrying harder makes 429 blocks longer (up to 24 hours),
 so the supported fix is to stop sending per-build requests upstream at all.
 Routing builds through this cache does that.
 
+#### Measured upstream reduction
+
+Request counts below were measured against a logging upstream that records every
+request the cache forwards, with `store: true`:
+
+| Scenario | Client requests | Upstream requests |
+| --- | --- | --- |
+| One warm artifact, 50 sequential | 50 | **0** |
+| One warm artifact, 50 concurrent | 50 | **0** |
+| 20 cold artifacts, 5 sequential passes each | 100 | **40** (2 per artifact) |
+| 20 cold artifacts, 5 concurrent passes each | 100 | **65** (cold-start fan-out) |
+
+Two properties matter for capacity planning:
+
+- **Warm reads never reach upstream.** Once an artifact is cached, any number of
+  builds resolving it costs Central nothing. This is the steady state, and it is
+  what removes the 429 pressure.
+- **Cold start fans out under concurrency.** When several builds request the same
+  *uncached* artifact simultaneously, each in-flight request misses the cache and
+  forwards upstream, so the first minutes after a cache wipe or a large dependency
+  bump cost more upstream requests than the same load would serially. It still
+  beats no cache at all (65 vs 100 above), and it self-corrects within one pass.
+  To blunt it, pre-warm a fresh cache during a quiet window
+  (`mvn -B dependency:go-offline` in a warm-up job) rather than on the critical
+  path of a large parallel build, and prefer persistence so wipes are rare.
+
+Correctness is unaffected: in the concurrent cold-start tests every client
+received `200` with identical content.
+
 Notes:
 
 - **Maven has no reliable client-level fallback.** Mirror semantics are complex
