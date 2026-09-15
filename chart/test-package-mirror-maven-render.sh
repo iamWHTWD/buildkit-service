@@ -125,4 +125,67 @@ check_maven_size_pairing() {
 check_maven_size_pairing "$chart_dir/values.yaml"
 check_maven_size_pairing "$chart_dir/values-quickstart.yaml"
 
+# The shared configuration is mounted with subPath, so Helm updating the
+# ConfigMap alone does NOT reach a running container. Without a checksum in the
+# Pod template, `helm upgrade` with new configuration leaves Reposilite serving
+# the old file. Each configurable repository setting must therefore change the
+# rendered Pod template.
+render_maven_deployment() {
+  helm template package-mirror-test "$chart_dir" "${common_args[@]}" "$@" \
+    --show-only templates/package-mirror-maven-deployment.yaml
+}
+
+render_maven_deployment > "$tmp_dir/base-deployment.yaml"
+assert_contains "checksum/config:" "$tmp_dir/base-deployment.yaml"
+
+# Numbers, strings and booleans each use the --set form Helm parses to the
+# matching type (--set-string would turn false into the truthy string "false").
+for setting in \
+  "packageMirror.maven.metadataMaxAge=9999" \
+  "packageMirror.maven.resolutionCacheMaxEntries=512"; do
+  render_maven_deployment --set "$setting" > "$tmp_dir/changed.yaml"
+  if diff -q "$tmp_dir/base-deployment.yaml" "$tmp_dir/changed.yaml" >/dev/null; then
+    fail "changing $setting does not change the maven Pod template, so the Pod will not roll"
+  fi
+done
+
+for setting in \
+  "packageMirror.maven.upstreamUrl=https://alt.example.com/m2/" \
+  "packageMirror.maven.repositoryId=internal"; do
+  render_maven_deployment --set-string "$setting" > "$tmp_dir/changed.yaml"
+  if diff -q "$tmp_dir/base-deployment.yaml" "$tmp_dir/changed.yaml" >/dev/null; then
+    fail "changing $setting does not change the maven Pod template, so the Pod will not roll"
+  fi
+done
+
+render_maven_deployment --set packageMirror.maven.store=false > "$tmp_dir/changed.yaml"
+if diff -q "$tmp_dir/base-deployment.yaml" "$tmp_dir/changed.yaml" >/dev/null; then
+  fail "disabling packageMirror.maven.store does not change the maven Pod template, so the Pod will not roll"
+fi
+
+# Helm renders numeric 0 as empty, so `default` would silently fall back to the
+# shared replica count and scaling this backend to zero would start Pods.
+render_rendered_replicas() {
+  render_maven_deployment "$@" | sed -n 's/^  replicas: //p' | head -1
+}
+[[ "$(render_rendered_replicas)" == "1" ]] \
+  || fail "expected the default maven replica count to be 1, got '$(render_rendered_replicas)'"
+[[ "$(render_rendered_replicas --set packageMirror.maven.replicaCount=0)" == "0" ]] \
+  || fail "an explicit maven replicaCount=0 must render replicas: 0, got '$(render_rendered_replicas --set packageMirror.maven.replicaCount=0)'"
+[[ "$(render_rendered_replicas --set packageMirror.maven.replicaCount=3)" == "3" ]] \
+  || fail "maven replicaCount=3 must render replicas: 3"
+
+# A ReadWriteOnce cache volume cannot attach to a replacement Pod while the
+# outgoing one holds it, so the surging default strategy must not be used when
+# persistence is on. Overriding explicitly stays possible.
+render_rendered_strategy() {
+  render_maven_deployment "$@" | sed -n '/^  strategy:/,/^  selector:/p' | sed -n 's/^    type: //p' | head -1
+}
+[[ "$(render_rendered_strategy --set packageMirror.maven.persistence.enabled=true)" == "Recreate" ]] \
+  || fail "persistence-enabled maven must default to the Recreate strategy"
+[[ "$(render_rendered_strategy --set packageMirror.maven.persistence.enabled=false)" == "RollingUpdate" ]] \
+  || fail "non-persistent maven must keep the shared RollingUpdate strategy"
+[[ "$(render_rendered_strategy --set packageMirror.maven.persistence.enabled=true --set packageMirror.maven.strategy.type=RollingUpdate)" == "RollingUpdate" ]] \
+  || fail "an explicit maven.strategy must override the topology-aware default"
+
 echo "package-mirror maven render test: PASS"

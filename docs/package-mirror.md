@@ -861,6 +861,7 @@ All on port 80.
 - Maven resolution cache entries (0 disables, 2048+ for a broad upstream): `--set packageMirror.maven.resolutionCacheMaxEntries=2048`
 - Maven JVM heap: `--set-string packageMirror.maven.env.javaOpts='-Xms512m -Xmx1g'`
 - Maven cache volume (persistence is off by default, matching the other backends): `--set packageMirror.maven.persistence.enabled=true --set packageMirror.maven.persistence.size=200Gi`
+- Maven update strategy (defaults to `Recreate` when persistence is on, because a ReadWriteOnce volume cannot attach to a replacement Pod while the outgoing one holds it; override explicitly for a ReadWriteMany claim): `--set packageMirror.maven.strategy.type=RollingUpdate`
 - Maven storage quota (`90%`, `500MB`, ...; empty = whole volume): `--set-string packageMirror.maven.env.quota=80Gi`
 - Maven backend off: `--set packageMirror.maven.enabled=false`
 - PDB: `--set packageMirror.podDisruptionBudget.enabled=true --set packageMirror.podDisruptionBudget.maxUnavailable=1`
@@ -916,6 +917,13 @@ into ConfigMaps and mounted read-only.
   proxies every request straight through to Maven Central and the 429 traffic is
   unchanged. `metadataMaxAge` must likewise stay bounded: `0` refetches
   `maven-metadata.xml` on every request.
+- The Maven shared configuration is mounted with `subPath`, so editing the
+  ConfigMap alone does not reach a running container. The Pod template carries a
+  `checksum/config` annotation, and changing any repository setting
+  (`upstreamUrl`, `metadataMaxAge`, `store`, `repositoryId`, ...) rolls the Pod.
+  A `helm upgrade` that changes only such a value therefore restarts this
+  backend; expect a brief window where it is unavailable while Reposilite
+  reinitializes.
 
 ## Docker regression test
 

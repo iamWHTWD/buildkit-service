@@ -9,9 +9,35 @@ metadata:
     {{- include "buildkit-service.packageMirror.labels" . | nindent 4 }}
     app.kubernetes.io/component: maven
 spec:
-  replicas: {{ .Values.packageMirror.maven.replicaCount | default .Values.packageMirror.deployment.replicaCount }}
+  {{- /*
+    hasKey distinguishes an absent replicaCount from an explicit 0: Helm treats
+    numeric 0 as empty, so `default` would fall back to the shared replica count
+    and an attempt to scale this backend to zero would instead start that many
+    Pods. values.yaml always supplies the key, so the fallback only applies to
+    values files that deliberately omit it.
+  */}}
+  {{- $replicas := .Values.packageMirror.maven.replicaCount }}
+  {{- if not (hasKey .Values.packageMirror.maven "replicaCount") }}
+  {{- $replicas = .Values.packageMirror.deployment.replicaCount }}
+  {{- end }}
+  replicas: {{ $replicas }}
+  {{- /*
+    A ReadWriteOnce cache volume cannot be attached to the replacement Pod while
+    the outgoing Pod still holds it, so the shared RollingUpdate strategy (which
+    surges a new Pod before removing the old one) can leave the replacement
+    stuck ContainerCreating. Recreate is the safe policy for that topology.
+    Empty maven.strategy selects this default; set it explicitly to override.
+  */}}
+  {{- $strategy := .Values.packageMirror.maven.strategy }}
+  {{- if not $strategy }}
+  {{- if .Values.packageMirror.maven.persistence.enabled }}
+  {{- $strategy = dict "type" "Recreate" }}
+  {{- else }}
+  {{- $strategy = .Values.packageMirror.deployment.strategy }}
+  {{- end }}
+  {{- end }}
   strategy:
-    {{- toYaml .Values.packageMirror.deployment.strategy | nindent 4 }}
+    {{- toYaml $strategy | nindent 4 }}
   selector:
     matchLabels:
       {{- include "buildkit-service.packageMirror.mavenSelectorLabels" . | nindent 6 }}
@@ -23,10 +49,18 @@ spec:
         {{- with .Values.packageMirror.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
-      {{- with .Values.packageMirror.podAnnotations }}
       annotations:
+        {{- /*
+          The shared configuration is mounted with subPath, so a ConfigMap update
+          does not propagate into a running container. Rolling the Pod on a
+          checksum change is what actually applies edits to upstreamUrl,
+          metadataMaxAge, resolutionCacheMaxEntries, and the other repository
+          settings.
+        */}}
+        checksum/config: {{ include (print $.Template.BasePath "/package-mirror-maven-configmap.yaml") . | sha256sum }}
+        {{- with .Values.packageMirror.podAnnotations }}
         {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- end }}
     spec:
       {{- with .Values.packageMirror.imagePullSecrets }}
       imagePullSecrets:

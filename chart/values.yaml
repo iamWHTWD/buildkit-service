@@ -1012,6 +1012,14 @@ packageMirror:
         # is what the "quota rule" in docs/package-mirror.md warns about. This is
         # also the headroom for the cache when a PVC is used instead.
         ephemeral-storage: 100Gi
+    # Deployment update strategy. Empty selects a topology-aware default:
+    # Recreate when persistence is enabled, because a ReadWriteOnce volume cannot
+    # be attached to a replacement Pod while the outgoing Pod still holds it, so
+    # a surging RollingUpdate can leave the new Pod stuck ContainerCreating.
+    # Without persistence the shared packageMirror.deployment.strategy applies.
+    # Set this explicitly to override (for example with a ReadWriteMany claim,
+    # RollingUpdate is safe).
+    strategy: {}
     # Enabled=false matches every other backend, so a default install needs no
     # StorageClass. That means the cache is an emptyDir and is lost on restart,
     # which costs a cold refill from upstream. Enable this for any environment
